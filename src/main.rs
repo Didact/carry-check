@@ -76,7 +76,12 @@ where CC: hyper::client::Connect {
                 .and_then(|v| v.get("Response")).and_then(|v| v.get("data")).and_then(|v| v.get("characters"))
                 .and_then(|v| v.as_array())
                 .map(|vs| vs.iter().filter_map(|cv| {
-                    cv.get("characterBase").and_then(|cv| cv.get("characterId")).and_then(|v| v.as_str()).map(String::from).map(|id| CharacterId(id))
+                    cv
+                        .get("characterBase")
+                        .and_then(|cv| cv.get("characterId"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .map(|id| CharacterId(id))
                 }))
                 .map(|ids| ids.collect())
                 .unwrap_or(vec![])
