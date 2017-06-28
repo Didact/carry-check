@@ -11,7 +11,7 @@ use hyper::{Client, Request, Method};
 use hyper::client::{FutureResponse};
 use hyper_tls::{HttpsConnector};
 use tokio_core::reactor::{Core};
-use serde_json::{Deserializer, Value};
+use serde_json::{Value};
 use std::result::{Result};
 use std::option::{Option};
 use std::boxed::{Box};
@@ -56,7 +56,15 @@ where CC: hyper::client::Connect {
     req.headers_mut().set(XBnetApiHeader(String::from("")));
     Box::new(client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
-            serde_json::from_slice::<Value>(&body).as_ref().ok().and_then(|v| v.get("Response")).and_then(|r| r.as_array()).and_then(|a| a.first()).and_then(|r| r.get("membershipId")).and_then(|m| m.as_str()).map(String::from).map(|id| AccountId(id))
+            serde_json::from_slice::<Value>(&body)
+                .as_ref().ok()
+                .and_then(|v| v.get("Response"))
+                .and_then(|r| r.as_array())
+                .and_then(|a| a.first())
+                .and_then(|r| r.get("membershipId"))
+                .and_then(|m| m.as_str())
+                .map(String::from)
+                .map(|id| AccountId(id))
         })
     }))
 }
