@@ -4,6 +4,7 @@ extern crate hyper_tls;
 extern crate tokio_core;
 extern crate serde_json;
 
+
 use std::fmt::{Display, Formatter, Error};
 use std::io::{self, Write};
 use futures::{Future, Stream};
@@ -18,6 +19,8 @@ use std::boxed::{Box};
 
 header! { (XBnetApiHeader, "X-API-Key") => [String] }
 
+const API_KEY: &'static str = "";
+
 #[derive(Copy, Clone, Debug)]
 enum PlatformType {
     Xbl = 1,
@@ -25,16 +28,7 @@ enum PlatformType {
     Unknown = 254
 }
 
-impl Display for PlatformType {
-    fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
-        match self {
-            &PlatformType::Xbl => {write!(f, "1")}
-            &PlatformType::Psn => {write!(f, "2")}
-            &PlatformType::Unknown => {write!(f, "254")}
-        }
-    }
-}
-
+#[derive(Clone, Debug)]
 struct AccountId(String);
 impl Display for AccountId {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
@@ -42,6 +36,7 @@ impl Display for AccountId {
     }
 }
 
+#[derive(Clone, Debug)]
 struct CharacterId(String);
 impl Display for CharacterId {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
@@ -51,9 +46,9 @@ impl Display for CharacterId {
 
 fn get_account_id<CC>(platform: PlatformType, display_name: &str, client: &Client<CC>) -> Box<Future<Item=Option<AccountId>, Error=hyper::Error>>
 where CC: hyper::client::Connect {
-    let uri = format!("https://www.bungie.net/Platform/Destiny/SearchDestinyPlayer/{membershipType}/{displayName}/", membershipType=platform, displayName=display_name);
+    let uri = format!("https://www.bungie.net/Platform/Destiny/SearchDestinyPlayer/{membershipType}/{displayName}/", membershipType=platform as u8, displayName=display_name);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
-    req.headers_mut().set(XBnetApiHeader(String::from("")));
+    req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
     Box::new(client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
@@ -69,13 +64,24 @@ where CC: hyper::client::Connect {
     }))
 }
 
-fn get_account_summary<CC>(platform: PlatformType, account: &AccountId, client: &Client<CC>) -> FutureResponse 
+fn get_character_ids<CC>(platform: PlatformType, account: &AccountId, client: &Client<CC>) -> Box<Future<Item=Vec<CharacterId>, Error=hyper::Error>>
 where CC: hyper::client::Connect {
-    let uri = format!("https://www.bungie.net/Platform/Destiny/{membershipType}/Account/{destinyMembershipId}/Summary/", membershipType=platform, destinyMembershipId=account);
+    let uri = format!("https://www.bungie.net/Platform/Destiny/{membershipType}/Account/{destinyMembershipId}/Summary/", membershipType=platform as u8, destinyMembershipId=account);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
-    req.headers_mut().set(XBnetApiHeader(String::from("")));
-    println!("ayy");
-    client.request(req)
+    req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+    Box::new(client.request(req).and_then(|res| {
+        res.body().concat2().map(|body| {
+            serde_json::from_slice::<Value>(&body)
+                .as_ref().ok()
+                .and_then(|v| v.get("Response")).and_then(|v| v.get("data")).and_then(|v| v.get("characters"))
+                .and_then(|v| v.as_array())
+                .map(|vs| vs.iter().filter_map(|cv| {
+                    cv.get("characterBase").and_then(|cv| cv.get("characterId")).and_then(|v| v.as_str()).map(String::from).map(|id| CharacterId(id))
+                }))
+                .map(|ids| ids.collect())
+                .unwrap_or(vec![])
+        })
+    }))
 }
 
 fn main() {
@@ -86,10 +92,8 @@ fn main() {
     	.build(handle);
 
     let work = get_account_id(PlatformType::Psn, "King_Cepheus", &client).and_then(|id| {
-        get_account_summary(PlatformType::Psn, &id.unwrap(), &client).and_then(|res| {
-            res.body().concat2().map(|body| {
-                io::stdout().write_all(&body)
-             })
+        get_character_ids(PlatformType::Psn, &id.unwrap(), &client).map(|ids| {
+            println!("{:?}", ids);
         })
     });
     core.run(work).unwrap();
