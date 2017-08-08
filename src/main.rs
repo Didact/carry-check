@@ -21,6 +21,7 @@ header! { (XBnetApiHeader, "X-API-Key") => [String] }
 
 const API_KEY: &'static str = "";
 
+
 #[derive(Copy, Clone, Debug)]
 enum PlatformType {
     Xbl = 1,
@@ -60,6 +61,8 @@ where CC: hyper::client::Connect {
                 .and_then(|m| m.as_str())
                 .map(String::from)
                 .map(|id| AccountId(id))
+                //TODO
+                //.unwrap()
         })
     }))
 }
@@ -89,6 +92,36 @@ where CC: hyper::client::Connect {
     }))
 }
 
+fn get_trials_games<CC>(platform: PlatformType, account: &AccountId, character: &CharacterId, client: &Client<CC>) -> Box<Future<Item=Vec<String>, Error=hyper::Error>>
+where CC: hyper::client::Connect {
+    let uri = format!("https://www.bungie.net/Platform/Destiny/Stats/ActivityHistory/{membershipType}/{destinyMembershipId}/{characterId}/?mode=TrialsOfOsiris", 
+        membershipType=platform as u8, 
+        destinyMembershipId = account, 
+        characterId = character);
+    let mut req = Request::new(Method::Get, uri.parse().unwrap());
+    req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+    Box::new(client.request(req).and_then(|res| {
+        res.body().concat2().map(|body| {
+            serde_json::from_slice::<Value>(&body)
+                .as_ref().ok()
+                .and_then(|v| v.get("Response"))
+                .and_then(|v| v.get("data"))
+                .and_then(|v| v.get("activities"))
+                .and_then(|v| v.as_array())
+                .map(|vs| vs.iter().filter_map(|cv| {
+                    cv
+                        .get("activityDetails")
+                        .and_then(|cv| cv.get("instanceId"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                }))
+                .map(|ids| ids.collect())
+                .unwrap_or(vec![])
+        })
+    }))
+}
+
+
 fn main() {
     let mut core = Core::new().unwrap();
     let handle = &core.handle();
@@ -96,9 +129,16 @@ fn main() {
     	.connector(HttpsConnector::new(4, handle).unwrap())
     	.build(handle);
 
-    let work = get_account_id(PlatformType::Psn, "King_Cepheus", &client).and_then(|id| {
-        get_character_ids(PlatformType::Psn, &id.unwrap(), &client).map(|ids| {
+    let gamertag = "King_Cepheus";
+
+    let work = get_account_id(PlatformType::Psn, gamertag, &client).and_then(|id| {
+        let id = id.unwrap().clone();
+        get_character_ids(PlatformType::Psn, &id, &client).and_then(move |ids| {
             println!("{:?}", ids);
+            let id = id.clone();
+            get_trials_games(PlatformType::Psn, &id, &ids[0], &client).map(|pgcr_ids| {
+                println!("{:?}", pgcr_ids);
+            })
         })
     });
     core.run(work).unwrap();
