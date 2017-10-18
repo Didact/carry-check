@@ -10,14 +10,16 @@ extern crate serde_json;
 extern crate chrono;
 
 use std::fmt::{Display, Formatter, Error};
-use std::io::{self, Write};
+// use std::io::{self, Write};
 use std::result::{Result};
 use std::option::{Option};
 use std::boxed::{Box};
 use std::str::{FromStr};
+use std::sync::{Arc};
 
 use futures::{Future, Stream};
 use futures::future::{join_all};
+use futures::stream::{futures_unordered};
 use hyper::{Client, Request, Method};
 use hyper_tls::{HttpsConnector};
 
@@ -29,8 +31,33 @@ use chrono::{DateTime, Utc};
 
 header! { (XBnetApiHeader, "X-API-Key") => [String] }
 
-const API_KEY: &'static str = "";
+macro_rules! bind {
 
+    ( [ $($rest:tt)+ ], $fun:expr ) => {{
+        bind_helper!($($rest)+, $fun)
+    }};
+
+}
+
+macro_rules! bind_helper {
+    ( $i:ident, $($rest:tt)+) => {{
+        let $i = $i;
+        bind_helper!($($rest)+)
+    }};
+
+    ( $i:ident = $e:expr, $($rest:tt)+) => {{
+        let $i = $e;
+        bind_helper!($($rest)+)
+    }};
+
+    ( $fun:expr ) => {
+        move |other| {
+            $fun(other)
+        }
+    };
+}
+
+const API_KEY: &'static str = "";
 
 #[derive(Copy, Clone, Debug)]
 enum PlatformType {
@@ -209,34 +236,43 @@ where CC: hyper::client::Connect {
     }))
 }
 
+fn get_account_stats<CC>(_account_id: AccountId, _client: &Client<CC>) -> Box<Future<Item=PlayerInstanceStats, Error=hyper::Error>>
+where CC: hyper::client::Connect {
+    unimplemented!()
+}
+
 
 fn main() {
     let mut core = Core::new().unwrap();
     let handle = &core.handle();
-    let client = Client::configure()
+    let client = Arc::new(Client::configure()
     	.connector(HttpsConnector::new(4, handle).unwrap())
-    	.build(handle);
+    	.build(handle));
 
     let gamertag = "King_Cepheus";
 
     let work = get_account_id(PlatformType::Psn, gamertag, &client).and_then(|id| {
-        println!("{:?}", id.unwrap());
-        get_character_ids(PlatformType::Psn, id.unwrap(), &client).and_then(move |ids| {
-            println!("{:?}", ids);
-            get_trials_game_ids(PlatformType::Psn, id.unwrap(), ids[0], &client).and_then(move |pgcr_ids| {
-                // rust chokes without an explicit type
-                println!("{:?}", pgcr_ids);
-                let futures: Vec<Box<Future<Item=Pgcr, Error=hyper::Error>>> = pgcr_ids.into_iter().map(|id| get_carnage_report(id, &client)).collect();
-                join_all(futures)
-            })
-            .map(|pgcrs| {
-                for pgcr in pgcrs {
-                    for stat in pgcr.stats {
-                        println!("team: {:?}, id: {}, kd: {}, kda: {}", stat.team, stat.id, stat.kd(), stat.kda());
-                    }
-                }
-            })
-        })
+        get_character_ids(PlatformType::Psn, id.unwrap(), &client).and_then(bind!([id, client = client.clone()], |ids: Vec<CharacterId>| {
+            join_all(ids.into_iter().map(bind!([id, client = client.clone()], |char_id| {
+                get_trials_game_ids(PlatformType::Psn, id.unwrap(), char_id, &client)
+            })))
+            .map(|pgcr_ids| pgcr_ids.into_iter().flat_map(|x| x.into_iter()).collect::<Vec<_>>())
+            .map(bind!([client = client.clone()], |pgcr_ids: Vec<PgcrId>| {
+                futures_unordered(pgcr_ids.into_iter().map(|pgcr_id| {
+                    get_carnage_report(pgcr_id, &client)
+                }))
+            }))
+            .and_then(bind!([client = client.clone()], |pgcrs: futures::stream::FuturesUnordered<_>| {
+                // diverge to hopefully concurrent processing
+                pgcrs.and_then(bind!([client = client.clone()], |pgcr: Pgcr| {
+                    join_all(pgcr.stats.into_iter().map(bind!([client = client.clone()], |stat: PlayerInstanceStats| {
+                        get_account_stats(stat.id, &client)
+                    })))
+                })).collect()
+            }))
+        }))
     });
+    
+
     core.run(work).unwrap();
 }
