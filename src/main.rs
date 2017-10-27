@@ -2,6 +2,8 @@
 extern crate hyper;
 #[macro_use]
 extern crate serde_derive;
+#[macro_use]
+extern crate lazy_static;
 
 extern crate futures;
 extern crate hyper_tls;
@@ -10,14 +12,16 @@ extern crate serde_json;
 extern crate chrono;
 
 use std::fmt::{Display, Formatter, Error};
-// use std::io::{self, Write};
+use std::io::{self, Write};
 use std::result::{Result};
 use std::option::{Option};
 use std::boxed::{Box};
 use std::str::{FromStr};
-use std::sync::{Arc};
+use std::sync::{Arc, Mutex, RwLock};
+use std::collections::{HashMap};
+use std::hash::{Hash};
 
-use futures::{Future, Stream};
+use futures::{Future, Stream, IntoFuture};
 use futures::future::{join_all};
 use futures::stream::{futures_unordered};
 use hyper::{Client, Request, Method};
@@ -57,6 +61,60 @@ macro_rules! bind_helper {
     };
 }
 
+lazy_static! {
+    static ref memoize_dict: Mutex<HashMap<&'static str, usize>> = {Mutex::new(HashMap::new())};
+}
+
+fn memoize<K, T, E, F>(memoize_key: &'static str, primary_key: K, future: F) -> Memoize<K, T, E, F::Future> 
+where 
+    K: Hash + Eq + PartialEq,
+    F: IntoFuture<Item=T, Error=E> {
+        let mut dict = memoize_dict.lock().unwrap();
+        if !dict.contains_key(memoize_key) {
+            dict.insert(
+                memoize_key, 
+                Box::into_raw(Box::new(Arc::new(RwLock::new(HashMap::<K, T>::new())))) as usize
+            );
+        }
+
+        Memoize {
+            key: primary_key,
+            cache: unsafe { &*(dict.get(memoize_key).unwrap().clone() as *mut Arc<RwLock<HashMap<K, T>>>) }.clone(),
+            future: future.into_future()
+        }
+}
+
+struct Memoize<K, T, E, F>
+where F: Future<Item=T, Error=E> {
+    key: K,
+    cache: Arc<RwLock<HashMap<K, T>>>,
+    future: F
+}
+
+impl <K, T, E, F> Future for Memoize<K, T, E, F>
+where 
+    K: Hash + Eq + Clone,
+    T: Clone,
+    F: Future<Item=T, Error=E> {
+    type Item = T;
+    type Error = E;
+
+    fn poll(&mut self) -> futures::Poll<Self::Item, Self::Error> {
+        if let Some(cached) = self.cache.read().unwrap().get(&self.key) {
+            return Ok(futures::Async::Ready(cached.clone()))
+        }
+        let result = self.future.poll();
+        match &result {
+            &Ok(futures::Async::Ready(ref t)) => {
+                self.cache.write().unwrap().insert(self.key.clone(), t.clone());
+            }
+            _ => {}
+        }
+        result
+       
+    }
+}
+
 const API_KEY: &'static str = "";
 
 #[derive(Copy, Clone, Debug)]
@@ -66,7 +124,7 @@ enum PlatformType {
     Unknown = 254
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct AccountId(u64);
 impl Display for AccountId {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
@@ -113,12 +171,12 @@ where CC: hyper::client::Connect {
     }))
 }
 
-fn get_character_ids<CC>(platform: PlatformType, account: AccountId, client: &Client<CC>) -> Box<Future<Item=Vec<CharacterId>, Error=hyper::Error>>
+fn get_character_ids<CC>(platform: PlatformType, account_id: AccountId, client: &Client<CC>) -> Box<Future<Item=Vec<CharacterId>, Error=hyper::Error>>
 where CC: hyper::client::Connect {
-    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Profile/{destinyMembershipId}/?components=200", membershipType=platform as u8, destinyMembershipId=account);
+    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Profile/{destinyMembershipId}/?components=200", membershipType=platform as u8, destinyMembershipId=account_id);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    Box::new(client.request(req).and_then(|res| {
+    Box::new(memoize("get_character_ids", account_id, client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -131,7 +189,7 @@ where CC: hyper::client::Connect {
                 .unwrap_or(vec![])
                
         })
-    }))
+    })))
 }
 
 fn get_trials_game_ids<CC>(platform: PlatformType, account: AccountId, character: CharacterId, client: &Client<CC>) -> Box<Future<Item=Vec<PgcrId>, Error=hyper::Error>>
@@ -162,13 +220,13 @@ where CC: hyper::client::Connect {
     }))
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Copy, Clone)]
 enum Team {
         Alpha,
         Bravo
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PlayerInstanceStats {
     id: AccountId,
     kills: u64,
@@ -236,11 +294,23 @@ where CC: hyper::client::Connect {
     }))
 }
 
-fn get_account_stats<CC>(_account_id: AccountId, _client: &Client<CC>) -> Box<Future<Item=PlayerInstanceStats, Error=hyper::Error>>
-where CC: hyper::client::Connect {
-    unimplemented!()
+fn get_account_stats<CC>(platform_type: PlatformType, account_id: AccountId, client: &Client<CC>) -> Box<Future<Item=PlayerInstanceStats, Error=hyper::Error>>
+where 
+    CC: hyper::client::Connect,
+    Client<CC>: Clone {
+    Box::new(get_character_ids(platform_type, account_id, client).and_then(bind!([platform_type, account_id, client = client.clone()], |ids: Vec<CharacterId>| {
+        let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform_type as u8, destinyMembershipId=account_id, characterId=ids[0]);
+        let mut req = Request::new(Method::Get, url.parse().unwrap());
+        req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+        client.request(req).and_then(|res| {
+            res.body().concat2().map(|body| {
+                io::stdout().write_all(&body);
+                println!("");
+                unimplemented!()
+            })
+        })
+    })))
 }
-
 
 fn main() {
     let mut core = Core::new().unwrap();
@@ -266,7 +336,7 @@ fn main() {
                 // diverge to hopefully concurrent processing
                 pgcrs.and_then(bind!([client = client.clone()], |pgcr: Pgcr| {
                     join_all(pgcr.stats.into_iter().map(bind!([client = client.clone()], |stat: PlayerInstanceStats| {
-                        get_account_stats(stat.id, &client)
+                        get_account_stats(PlatformType::Psn, stat.id, &client)
                     })))
                 })).collect()
             }))
