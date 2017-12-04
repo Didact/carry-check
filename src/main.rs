@@ -10,6 +10,7 @@ extern crate hyper_tls;
 extern crate tokio_core;
 extern crate serde_json;
 extern crate chrono;
+extern crate num;
 
 use std::fmt::{Display, Formatter, Error};
 use std::io::{self, Write};
@@ -24,6 +25,7 @@ use std::hash::{Hash};
 use futures::{Future, Stream, IntoFuture};
 use futures::future::{join_all};
 use futures::stream::{futures_unordered};
+
 use hyper::{Client, Request, Method};
 use hyper_tls::{HttpsConnector};
 
@@ -32,6 +34,8 @@ use tokio_core::reactor::{Core};
 use serde_json::{Value};
 
 use chrono::{DateTime, Utc};
+
+use num::cast::{FromPrimitive};
 
 header! { (XBnetApiHeader, "X-API-Key") => [String] }
 
@@ -79,7 +83,7 @@ where
 
         Memoize {
             key: primary_key,
-            cache: unsafe { &*(dict.get(memoize_key).unwrap().clone() as *mut Arc<RwLock<HashMap<K, T>>>) }.clone(),
+            cache: unsafe { &*(*dict.get(memoize_key).unwrap() as *mut Arc<RwLock<HashMap<K, T>>>) }.clone(),
             future: future.into_future()
         }
 }
@@ -104,8 +108,8 @@ where
             return Ok(futures::Async::Ready(cached.clone()))
         }
         let result = self.future.poll();
-        match &result {
-            &Ok(futures::Async::Ready(ref t)) => {
+        match result {
+            Ok(futures::Async::Ready(ref t)) => {
                 self.cache.write().unwrap().insert(self.key.clone(), t.clone());
             }
             _ => {}
@@ -294,6 +298,12 @@ where CC: hyper::client::Connect {
     }))
 }
 
+fn get_stat<T>(key: &str, value: &Value) -> Option<T>
+where
+    T: FromPrimitive {
+        value.get(key).and_then(|v| v.get("basic")).and_then(|v| v.get("value")).and_then(|v| v.as_f64()).and_then(T::from_f64)
+}
+
 fn get_account_stats<CC>(platform_type: PlatformType, account_id: AccountId, client: &Client<CC>) -> Box<Future<Item=PlayerInstanceStats, Error=hyper::Error>>
 where 
     CC: hyper::client::Connect,
@@ -305,7 +315,17 @@ where
         client.request(req).and_then(|res| {
             res.body().concat2().map(|body| {
                 io::stdout().write_all(&body);
-                println!("");
+                io::stdout().write_all(&['\n' as u8]);
+                let stats = serde_json::from_slice::<Value>(&body)
+                    .as_ref().ok()
+                    .and_then(|v| v.get("Response"))
+                    .and_then(|v| v.get("trialsofthenine"))
+                    .and_then(|v| v.get("allTime"))
+                    .and_then(|stats_base| {
+                        (get_stat::<u64>("kills", stats_base))
+                    });
+                stats.unwrap();
+
                 unimplemented!()
             })
         })
