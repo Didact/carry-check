@@ -80,12 +80,12 @@ impl Display for PgcrId {
     }
 }
 
-fn get_account_id<CC>(platform: PlatformType, display_name: &str, client: &Client<CC>) -> Box<Future<Item=Option<AccountId>, Error=hyper::Error>>
+fn get_account_id<CC>(platform: PlatformType, display_name: &str, client: &Client<CC>) -> impl Future<Item=Option<AccountId>, Error=hyper::Error>
 where CC: hyper::client::Connect {
     let uri = format!("https://www.bungie.net/Platform/Destiny2/SearchDestinyPlayer/{membershipType}/{displayName}/", membershipType=platform as u8, displayName=display_name);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    Box::new(client.request(req).and_then(|res| {
+    client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -99,17 +99,17 @@ where CC: hyper::client::Connect {
                 //TODO
                 //.unwrap()
         })
-    }))
+    })
 }
 
 const character_ids_key: MemoizeKey<AccountId, Vec<CharacterId>, hyper::Error> = MemoizeKey::new("get_character_ids");
 
-fn get_character_ids<CC>(platform: PlatformType, account_id: AccountId, client: &Client<CC>) -> Box<Future<Item=Vec<CharacterId>, Error=hyper::Error>>
+fn get_character_ids<CC>(platform: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=Vec<CharacterId>, Error=hyper::Error>
 where CC: hyper::client::Connect {
     let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Profile/{destinyMembershipId}/?components=200", membershipType=platform as u8, destinyMembershipId=account_id);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    Box::new(memoize(character_ids_key, account_id, client.request(req).and_then(|res| {
+    memoize(character_ids_key, account_id, client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -122,10 +122,10 @@ where CC: hyper::client::Connect {
                 .unwrap_or(vec![])
                
         })
-    })))
+    }))
 }
 
-fn get_trials_game_ids<CC>(platform: PlatformType, account: AccountId, character: CharacterId, client: &Client<CC>) -> Box<Future<Item=Vec<PgcrId>, Error=hyper::Error>>
+fn get_trials_game_ids<CC>(platform: PlatformType, account: AccountId, character: CharacterId, client: &Client<CC>) -> impl Future<Item=Vec<PgcrId>, Error=hyper::Error>
 where CC: hyper::client::Connect {
     let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=1&mode=39", 
         membershipType=platform as u8, 
@@ -133,7 +133,7 @@ where CC: hyper::client::Connect {
         characterId = character);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    Box::new(client.request(req).and_then(|res| {
+    client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -150,7 +150,7 @@ where CC: hyper::client::Connect {
                 .map(|ids| ids.collect())
                 .unwrap_or(vec![])
         })
-    }))
+    })
 }
 
 #[derive(Deserialize, Debug, Copy, Clone)]
@@ -214,17 +214,17 @@ impl Pgcr {
     }
 }
 
-fn get_carnage_report<CC>(pgcr_id: PgcrId, client: &Client<CC>) -> Box<Future<Item=Pgcr, Error=hyper::Error>>
+fn get_carnage_report<CC>(pgcr_id: PgcrId, client: &Client<CC>) -> impl Future<Item=Pgcr, Error=hyper::Error>
 where CC: hyper::client::Connect {
     let url = format!("https://www.bungie.net/Platform/Destiny2/Stats/PostGameCarnageReport/{id}/", id=pgcr_id);
     let mut req = Request::new(Method::Get, url.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    Box::new(client.request(req).and_then(|res| {
+    client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body).as_ref().ok().map(Pgcr::from_value).unwrap().unwrap()
             // serde_json::from_slice::<Pgcr>(&body).unwrap()
         })
-    }))
+    })
 }
 
 fn get_stat<T>(key: &str, value: &Value) -> Option<T>
@@ -233,7 +233,7 @@ where
         value.get(key).and_then(|v| v.get("basic")).and_then(|v| v.get("value")).and_then(|v| v.as_f64()).and_then(T::from_f64)
 }
 
-fn get_account_stats<'a, CC>(platform_type: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=PlayerInstanceStats, Error=hyper::Error> + 'a //Box<Future<Item=PlayerInstanceStats, Error=hyper::Error>>
+fn get_account_stats<'a, CC>(platform_type: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=PlayerInstanceStats, Error=hyper::Error> + 'a
 where 
     CC: hyper::client::Connect,
     Client<CC>: Clone {
