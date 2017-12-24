@@ -1,3 +1,12 @@
+#![feature(const_fn)]
+#![feature(conservative_impl_trait)]
+
+#[macro_use]
+mod bind;
+mod memoize;
+
+use memoize::{memoize, MemoizeKey};
+
 #[macro_use] 
 extern crate hyper;
 #[macro_use]
@@ -18,11 +27,9 @@ use std::result::{Result};
 use std::option::{Option};
 use std::boxed::{Box};
 use std::str::{FromStr};
-use std::sync::{Arc, Mutex, RwLock};
-use std::collections::{HashMap};
-use std::hash::{Hash};
+use std::sync::{Arc};
 
-use futures::{Future, Stream, IntoFuture};
+use futures::{Future, Stream};
 use futures::future::{join_all};
 use futures::stream::{futures_unordered};
 
@@ -38,86 +45,6 @@ use chrono::{DateTime, Utc};
 use num::cast::{FromPrimitive};
 
 header! { (XBnetApiHeader, "X-API-Key") => [String] }
-
-macro_rules! bind {
-
-    ( [ $($rest:tt)+ ], $fun:expr ) => {{
-        bind_helper!($($rest)+, $fun)
-    }};
-
-}
-
-macro_rules! bind_helper {
-    ( $i:ident, $($rest:tt)+) => {{
-        let $i = $i;
-        bind_helper!($($rest)+)
-    }};
-
-    ( $i:ident = $e:expr, $($rest:tt)+) => {{
-        let $i = $e;
-        bind_helper!($($rest)+)
-    }};
-
-    ( $fun:expr ) => {
-        move |other| {
-            $fun(other)
-        }
-    };
-}
-
-lazy_static! {
-    static ref memoize_dict: Mutex<HashMap<&'static str, usize>> = {Mutex::new(HashMap::new())};
-}
-
-fn memoize<K, T, E, F>(memoize_key: &'static str, primary_key: K, future: F) -> Memoize<K, T, E, F::Future> 
-where 
-    K: Hash + Eq + PartialEq,
-    F: IntoFuture<Item=T, Error=E> {
-        let mut dict = memoize_dict.lock().unwrap();
-        if !dict.contains_key(memoize_key) {
-            dict.insert(
-                memoize_key, 
-                Box::into_raw(Box::new(Arc::new(RwLock::new(HashMap::<K, T>::new())))) as usize
-            );
-        }
-
-        Memoize {
-            key: primary_key,
-            cache: unsafe { &*(*dict.get(memoize_key).unwrap() as *mut Arc<RwLock<HashMap<K, T>>>) }.clone(),
-            future: future.into_future()
-        }
-}
-
-struct Memoize<K, T, E, F>
-where F: Future<Item=T, Error=E> {
-    key: K,
-    cache: Arc<RwLock<HashMap<K, T>>>,
-    future: F
-}
-
-impl <K, T, E, F> Future for Memoize<K, T, E, F>
-where 
-    K: Hash + Eq + Clone,
-    T: Clone,
-    F: Future<Item=T, Error=E> {
-    type Item = T;
-    type Error = E;
-
-    fn poll(&mut self) -> futures::Poll<Self::Item, Self::Error> {
-        if let Some(cached) = self.cache.read().unwrap().get(&self.key) {
-            return Ok(futures::Async::Ready(cached.clone()))
-        }
-        let result = self.future.poll();
-        match result {
-            Ok(futures::Async::Ready(ref t)) => {
-                self.cache.write().unwrap().insert(self.key.clone(), t.clone());
-            }
-            _ => {}
-        }
-        result
-       
-    }
-}
 
 const API_KEY: &'static str = "";
 
@@ -175,12 +102,14 @@ where CC: hyper::client::Connect {
     }))
 }
 
+const character_ids_key: MemoizeKey<AccountId, Vec<CharacterId>, hyper::Error> = MemoizeKey::new("get_character_ids");
+
 fn get_character_ids<CC>(platform: PlatformType, account_id: AccountId, client: &Client<CC>) -> Box<Future<Item=Vec<CharacterId>, Error=hyper::Error>>
 where CC: hyper::client::Connect {
     let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Profile/{destinyMembershipId}/?components=200", membershipType=platform as u8, destinyMembershipId=account_id);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    Box::new(memoize("get_character_ids", account_id, client.request(req).and_then(|res| {
+    Box::new(memoize(character_ids_key, account_id, client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -304,11 +233,11 @@ where
         value.get(key).and_then(|v| v.get("basic")).and_then(|v| v.get("value")).and_then(|v| v.as_f64()).and_then(T::from_f64)
 }
 
-fn get_account_stats<CC>(platform_type: PlatformType, account_id: AccountId, client: &Client<CC>) -> Box<Future<Item=PlayerInstanceStats, Error=hyper::Error>>
+fn get_account_stats<'a, CC>(platform_type: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=PlayerInstanceStats, Error=hyper::Error> + 'a //Box<Future<Item=PlayerInstanceStats, Error=hyper::Error>>
 where 
     CC: hyper::client::Connect,
     Client<CC>: Clone {
-    Box::new(get_character_ids(platform_type, account_id, client).and_then(bind!([platform_type, account_id, client = client.clone()], |ids: Vec<CharacterId>| {
+    get_character_ids(platform_type, account_id, client).and_then(bind!([platform_type, account_id, client = client.clone()], |ids: Vec<CharacterId>| {
         let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform_type as u8, destinyMembershipId=account_id, characterId=ids[0]);
         let mut req = Request::new(Method::Get, url.parse().unwrap());
         req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
@@ -329,7 +258,7 @@ where
                 unimplemented!()
             })
         })
-    })))
+    }))
 }
 
 fn main() {
