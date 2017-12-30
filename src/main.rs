@@ -48,7 +48,7 @@ header! { (XBnetApiHeader, "X-API-Key") => [String] }
 
 const API_KEY: &'static str = "";
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 enum PlatformType {
     Xbl = 1,
     Psn = 2,
@@ -72,7 +72,7 @@ impl Display for CharacterId {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 struct PgcrId(u64);
 impl Display for PgcrId {
     fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
@@ -80,12 +80,13 @@ impl Display for PgcrId {
     }
 }
 
-fn get_account_id<CC>(platform: PlatformType, display_name: &str, client: &Client<CC>) -> impl Future<Item=Option<AccountId>, Error=hyper::Error>
+const account_id_key: MemoizeKey<(PlatformType, &str), Option<AccountId>, hyper::Error> = MemoizeKey::new("get_account_id");
+fn get_account_id<'a, CC>(platform: PlatformType, display_name: &'a str, client: &Client<CC>) -> impl Future<Item=Option<AccountId>, Error=hyper::Error> +'a
 where CC: hyper::client::Connect {
     let uri = format!("https://www.bungie.net/Platform/Destiny2/SearchDestinyPlayer/{membershipType}/{displayName}/", membershipType=platform as u8, displayName=display_name);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    client.request(req).and_then(|res| {
+    memoize(account_id_key, (platform, display_name), client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -99,17 +100,16 @@ where CC: hyper::client::Connect {
                 //TODO
                 //.unwrap()
         })
-    })
+    }))
 }
 
-const character_ids_key: MemoizeKey<AccountId, Vec<CharacterId>, hyper::Error> = MemoizeKey::new("get_character_ids");
-
+const character_ids_key: MemoizeKey<(PlatformType, AccountId), Vec<CharacterId>, hyper::Error> = MemoizeKey::new("get_character_ids");
 fn get_character_ids<CC>(platform: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=Vec<CharacterId>, Error=hyper::Error>
 where CC: hyper::client::Connect {
     let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Profile/{destinyMembershipId}/?components=200", membershipType=platform as u8, destinyMembershipId=account_id);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    memoize(character_ids_key, account_id, client.request(req).and_then(|res| {
+    memoize(character_ids_key, (platform, account_id), client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -125,6 +125,7 @@ where CC: hyper::client::Connect {
     }))
 }
 
+const trials_game_ids_key: MemoizeKey<(PlatformType, AccountId), Vec<PgcrId>, hyper::Error> = MemoizeKey::new("get_trials_game_ids");
 fn get_trials_game_ids<CC>(platform: PlatformType, account: AccountId, character: CharacterId, client: &Client<CC>) -> impl Future<Item=Vec<PgcrId>, Error=hyper::Error>
 where CC: hyper::client::Connect {
     let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=1&mode=39", 
@@ -133,7 +134,7 @@ where CC: hyper::client::Connect {
         characterId = character);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    client.request(req).and_then(|res| {
+    memoize(trials_game_ids_key, (platform, account), client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -150,7 +151,7 @@ where CC: hyper::client::Connect {
                 .map(|ids| ids.collect())
                 .unwrap_or(vec![])
         })
-    })
+    }))
 }
 
 #[derive(Deserialize, Debug, Copy, Clone)]
@@ -197,7 +198,7 @@ impl PlayerInstanceStats {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Pgcr {
     time: DateTime<Utc>,
     stats: Vec<PlayerInstanceStats>,
@@ -214,17 +215,18 @@ impl Pgcr {
     }
 }
 
+const carnage_report_key: MemoizeKey<PgcrId, Pgcr, hyper::Error> = MemoizeKey::new("get_carnage_report");
 fn get_carnage_report<CC>(pgcr_id: PgcrId, client: &Client<CC>) -> impl Future<Item=Pgcr, Error=hyper::Error>
 where CC: hyper::client::Connect {
     let url = format!("https://www.bungie.net/Platform/Destiny2/Stats/PostGameCarnageReport/{id}/", id=pgcr_id);
     let mut req = Request::new(Method::Get, url.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-    client.request(req).and_then(|res| {
+    memoize(carnage_report_key, pgcr_id, client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body).as_ref().ok().map(Pgcr::from_value).unwrap().unwrap()
             // serde_json::from_slice::<Pgcr>(&body).unwrap()
         })
-    })
+    }))
 }
 
 fn get_stat<T>(key: &str, value: &Value) -> Option<T>
@@ -233,15 +235,16 @@ where
         value.get(key).and_then(|v| v.get("basic")).and_then(|v| v.get("value")).and_then(|v| v.as_f64()).and_then(T::from_f64)
 }
 
-fn get_account_stats<'a, CC>(platform_type: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=PlayerInstanceStats, Error=hyper::Error> + 'a
+const account_stats_key: MemoizeKey<(PlatformType, AccountId), PlayerInstanceStats, hyper::Error> = MemoizeKey::new("get_account_stats");
+fn get_account_stats<'a, CC>(platform: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=PlayerInstanceStats, Error=hyper::Error> + 'a
 where 
     CC: hyper::client::Connect,
     Client<CC>: Clone {
-    get_character_ids(platform_type, account_id, client).and_then(bind!([platform_type, account_id, client = client.clone()], |ids: Vec<CharacterId>| {
-        let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform_type as u8, destinyMembershipId=account_id, characterId=ids[0]);
+    get_character_ids(platform, account_id, client).and_then(bind!([client = client.clone()], |ids: Vec<CharacterId>| {
+        let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform as u8, destinyMembershipId=account_id, characterId=ids[0]);
         let mut req = Request::new(Method::Get, url.parse().unwrap());
         req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
-        client.request(req).and_then(|res| {
+        memoize(account_stats_key, (platform, account_id), client.request(req).and_then(|res| {
             res.body().concat2().map(|body| {
                 io::stdout().write_all(&body);
                 io::stdout().write_all(&['\n' as u8]);
@@ -254,10 +257,11 @@ where
                         (get_stat::<u64>("kills", stats_base))
                     });
                 stats.unwrap();
+                println!("here");
 
                 unimplemented!()
             })
-        })
+        }))
     }))
 }
 
