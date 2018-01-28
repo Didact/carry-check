@@ -25,7 +25,7 @@ use std::fmt::{Display, Formatter, Error};
 use std::io::{self, Write};
 use std::result::{Result};
 use std::option::{Option};
-use std::boxed::{Box};
+use std::io::{BufRead};
 use std::str::{FromStr};
 use std::sync::{Arc};
 
@@ -46,7 +46,11 @@ use num::cast::{FromPrimitive};
 
 header! { (XBnetApiHeader, "X-API-Key") => [String] }
 
-const API_KEY: &'static str = "";
+lazy_static! {
+    static ref API_KEY: String = {
+        std::env::var("BNET_API").unwrap()
+    };
+}
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 enum PlatformType {
@@ -83,9 +87,10 @@ impl Display for PgcrId {
 const account_id_key: MemoizeKey<(PlatformType, &str), Option<AccountId>, hyper::Error> = MemoizeKey::new("get_account_id");
 fn get_account_id<'a, CC>(platform: PlatformType, display_name: &'a str, client: &Client<CC>) -> impl Future<Item=Option<AccountId>, Error=hyper::Error> +'a
 where CC: hyper::client::Connect {
+    println!("Getting AccountId for {:?}", display_name);
     let uri = format!("https://www.bungie.net/Platform/Destiny2/SearchDestinyPlayer/{membershipType}/{displayName}/", membershipType=platform as u8, displayName=display_name);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
-    req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+    req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
     memoize(account_id_key, (platform, display_name), client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
@@ -106,9 +111,10 @@ where CC: hyper::client::Connect {
 const character_ids_key: MemoizeKey<(PlatformType, AccountId), Vec<CharacterId>, hyper::Error> = MemoizeKey::new("get_character_ids");
 fn get_character_ids<CC>(platform: PlatformType, account_id: AccountId, client: &Client<CC>) -> impl Future<Item=Vec<CharacterId>, Error=hyper::Error>
 where CC: hyper::client::Connect {
+    println!("Getting CharacterIds for {:?}", account_id);
     let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Profile/{destinyMembershipId}/?components=200", membershipType=platform as u8, destinyMembershipId=account_id);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
-    req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+    req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
     memoize(character_ids_key, (platform, account_id), client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
@@ -128,12 +134,13 @@ where CC: hyper::client::Connect {
 const trials_game_ids_key: MemoizeKey<(PlatformType, AccountId), Vec<PgcrId>, hyper::Error> = MemoizeKey::new("get_trials_game_ids");
 fn get_trials_game_ids<CC>(platform: PlatformType, account: AccountId, character: CharacterId, client: &Client<CC>) -> impl Future<Item=Vec<PgcrId>, Error=hyper::Error>
 where CC: hyper::client::Connect {
+    println!("Getting PgcrIDs for {:?}", character);
     let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=1&mode=39", 
         membershipType=platform as u8, 
         destinyMembershipId = account, 
         characterId = character);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
-    req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+    req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
     memoize(trials_game_ids_key, (platform, account), client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body)
@@ -218,9 +225,10 @@ impl Pgcr {
 const carnage_report_key: MemoizeKey<PgcrId, Pgcr, hyper::Error> = MemoizeKey::new("get_carnage_report");
 fn get_carnage_report<CC>(pgcr_id: PgcrId, client: &Client<CC>) -> impl Future<Item=Pgcr, Error=hyper::Error>
 where CC: hyper::client::Connect {
+    println!("Getting Pgcr for {:?}", pgcr_id);
     let url = format!("https://www.bungie.net/Platform/Destiny2/Stats/PostGameCarnageReport/{id}/", id=pgcr_id);
     let mut req = Request::new(Method::Get, url.parse().unwrap());
-    req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+    req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
     memoize(carnage_report_key, pgcr_id, client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
             serde_json::from_slice::<Value>(&body).as_ref().ok().map(Pgcr::from_value).unwrap().unwrap()
@@ -240,10 +248,11 @@ fn get_account_stats<'a, CC>(platform: PlatformType, account_id: AccountId, clie
 where 
     CC: hyper::client::Connect,
     Client<CC>: Clone {
+    println!("Getting PlayerInstanceStats for {:?}", account_id);
     get_character_ids(platform, account_id, client).and_then(bind!([client = client.clone()], |ids: Vec<CharacterId>| {
         let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform as u8, destinyMembershipId=account_id, characterId=ids[0]);
         let mut req = Request::new(Method::Get, url.parse().unwrap());
-        req.headers_mut().set(XBnetApiHeader(API_KEY.into()));
+        req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
         memoize(account_stats_key, (platform, account_id), client.request(req).and_then(|res| {
             res.body().concat2().map(|body| {
                 io::stdout().write_all(&body);
@@ -253,13 +262,17 @@ where
                     .and_then(|v| v.get("Response"))
                     .and_then(|v| v.get("trialsofthenine"))
                     .and_then(|v| v.get("allTime"))
-                    .and_then(|stats_base| {
-                        (get_stat::<u64>("kills", stats_base))
+                    .map(|stats_base| {
+                        (
+                            get_stat::<u64>("kills", stats_base).unwrap(),
+                            get_stat::<u64>("activitiesEntered", stats_base).unwrap(),
+                        )
                     });
                 stats.unwrap();
+                println!("{:?}", stats.unwrap());
                 println!("here");
 
-                unimplemented!()
+                PlayerInstanceStats{assists: 0, deaths: 0, id: AccountId(20), kills: 0, team: Team::Alpha}
             })
         }))
     }))
@@ -272,30 +285,31 @@ fn main() {
     	.connector(HttpsConnector::new(4, handle).unwrap())
     	.build(handle));
 
-    let gamertag = "King_Cepheus";
+    let stdin = std::io::stdin();
 
-    let work = get_account_id(PlatformType::Psn, gamertag, &client).and_then(|id| {
-        get_character_ids(PlatformType::Psn, id.unwrap(), &client).and_then(bind!([id, client = client.clone()], |ids: Vec<CharacterId>| {
-            join_all(ids.into_iter().map(bind!([id, client = client.clone()], |char_id| {
-                get_trials_game_ids(PlatformType::Psn, id.unwrap(), char_id, &client)
-            })))
-            .map(|pgcr_ids| pgcr_ids.into_iter().flat_map(|x| x.into_iter()).collect::<Vec<_>>())
-            .map(bind!([client = client.clone()], |pgcr_ids: Vec<PgcrId>| {
-                futures_unordered(pgcr_ids.into_iter().map(|pgcr_id| {
-                    get_carnage_report(pgcr_id, &client)
+    stdin.lock().lines().for_each(|gamertag| {
+        let gamertag = gamertag.unwrap();
+        let work = get_account_id(PlatformType::Psn, &gamertag, &client).and_then(|id| {
+            get_character_ids(PlatformType::Psn, id.unwrap(), &client).and_then(bind!([id, client = client.clone()], |ids: Vec<CharacterId>| {
+                join_all(ids.into_iter().map(bind!([id, client = client.clone()], |char_id| {
+                    get_trials_game_ids(PlatformType::Psn, id.unwrap(), char_id, &client)
+                })))
+                .map(|pgcr_ids| pgcr_ids.into_iter().flat_map(|x| x.into_iter()).collect::<Vec<_>>())
+                .map(bind!([client = client.clone()], |pgcr_ids: Vec<PgcrId>| {
+                    futures_unordered(pgcr_ids.into_iter().map(|pgcr_id| {
+                        get_carnage_report(pgcr_id, &client)
+                    }))
+                }))
+                .and_then(bind!([client = client.clone()], |pgcrs: futures::stream::FuturesUnordered<_>| {
+                // diverge to hopefully concurrent processing
+                    pgcrs.and_then(bind!([client = client.clone()], |pgcr: Pgcr| {
+                        join_all(pgcr.stats.into_iter().map(bind!([client = client.clone()], |stat: PlayerInstanceStats| {
+                            get_account_stats(PlatformType::Psn, stat.id, &client)
+                        })))
+                    })).collect()
                 }))
             }))
-            .and_then(bind!([client = client.clone()], |pgcrs: futures::stream::FuturesUnordered<_>| {
-                // diverge to hopefully concurrent processing
-                pgcrs.and_then(bind!([client = client.clone()], |pgcr: Pgcr| {
-                    join_all(pgcr.stats.into_iter().map(bind!([client = client.clone()], |stat: PlayerInstanceStats| {
-                        get_account_stats(PlatformType::Psn, stat.id, &client)
-                    })))
-                })).collect()
-            }))
-        }))
+        });
+        core.run(work).unwrap();
     });
-    
-
-    core.run(work).unwrap();
 }
