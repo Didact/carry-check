@@ -4,6 +4,7 @@
 #![feature(nll)]
 #![feature(proc_macro)]
 #![feature(generators)]
+#![feature(never_type)]
 
 #[macro_use]
 mod bind;
@@ -17,10 +18,6 @@ extern crate hyper;
 extern crate serde_derive;
 #[macro_use]
 extern crate lazy_static;
-// #[macro_use]
-// extern crate mdo;
-// #[macro_use]
-// extern crate mdo_future;
 
 extern crate futures_await as futures;
 extern crate hyper_tls;
@@ -38,10 +35,11 @@ use std::str::{FromStr};
 use std::sync::{Arc};
 
 use futures::{Future, Stream};
-use futures::prelude::{async, await, async_block};
+use futures::prelude::{async, await};
 
 use hyper::{Client, Request, Method};
 use hyper::client::{Connect};
+use hyper::server::{Service, Response};
 use hyper_tls::{HttpsConnector};
 
 use tokio_core::reactor::{Core};
@@ -51,6 +49,34 @@ use serde_json::{Value};
 use chrono::{DateTime, Utc};
 
 use num::cast::{FromPrimitive};
+
+struct Carry {
+    handle: tokio_core::reactor::Handle,
+}
+
+impl Service for Carry {
+    type Request = Request;
+    type Response = Response;
+    type Error = hyper::Error;
+    type Future = Box<Future<Item=Self::Response, Error=Self::Error>>;
+
+    fn call(&self, req: Request) -> Self::Future {
+        let client = Arc::new(Client::configure()
+        .connector(HttpsConnector::new(4, &self.handle).unwrap())
+        .build(&self.handle));
+        println!("requested: {:?}", req.uri());
+        let gamertag = req.uri().path().split('/').collect::<Vec<&str>>()[1];
+        println!("gamertag: {:?}", gamertag);
+        let id_future = get_account_id(PlatformType::Psn, gamertag.into(), client.clone());
+        let elo_future = id_future.and_then(move |id| {
+            get_elo(id.unwrap(), client.clone())
+        });
+        Box::new(elo_future.map(|elo| {
+            Response::new().with_body(format!("{:?}", elo))
+        }))
+    }
+
+}
 
 header! { (XBnetApiHeader, "X-API-Key") => [String] }
 
@@ -339,67 +365,17 @@ fn get_elo(account_id: AccountId, client: Arc<Client<impl Connect>>) -> hyper::R
 }
 
 fn main() {
+    let addr = "127.0.0.1:3001".parse().unwrap();
     let mut core = Core::new().unwrap();
-    let handle = &core.handle();
-    let client = Arc::new(Client::configure()
-    	.connector(HttpsConnector::new(4, handle).unwrap())
-    	.build(handle));
-
-    let stdin = std::io::stdin();
-    println!("Go ahead");
-    let gamertag = stdin.lock().lines().next().unwrap().unwrap();
-
-        let work = async_block! {
-            let account_id = await!(get_account_id(PlatformType::Psn, gamertag, client.clone())).unwrap().unwrap();
-            let character_ids = await!(get_character_ids(PlatformType::Psn, account_id, client.clone())).unwrap();
-            let mut all_pgcr_ids = vec![];
-            for character_id in character_ids {
-                let pgcr_ids = await!(get_trials_game_ids(PlatformType::Psn, account_id, character_id, client.clone())).unwrap();
-                all_pgcr_ids.extend(pgcr_ids.iter());
-            }
-            let pgcr = await!(get_carnage_report(all_pgcr_ids[1], client.clone()));
-            let elo = await!(get_elo(account_id, client.clone()));
-            elo
-        };
-
-            // let all_trials_game_ids: Vec<PgcrId> = vec![];
-            // for character_id in character_ids {
-            //     let trials_game_ids = await!(get_trials_game_ids(PlatformType::Psn, account_id, character_id, client.clone())).unwrap();
-            //     all_trials_game_ids.append(&mut trials_game_ids);
-            // }
-        // let work = get_account_id(PlatformType::Psn, gamertag, client.clone()).and_then(|id| {
-        //     println!("{:?}", id.unwrap());
-        //     get_character_ids(PlatformType::Psn, id.unwrap(), &client).and_then(bind!([id, client = client.clone()], |ids: Vec<CharacterId>| {
-        //         join_all(ids.into_iter().map(bind!([id, client = client.clone()], |char_id| {
-        //             get_trials_game_ids(PlatformType::Psn, id.unwrap(), char_id, &client)
-        //         })))
-        //         .map(|pgcr_ids| pgcr_ids.into_iter().flat_map(|x| x.into_iter()).collect::<Vec<_>>())
-        //         .map(bind!([client = client.clone()], |pgcr_ids: Vec<PgcrId>| {
-        //             futures_unordered(pgcr_ids.into_iter().map(|pgcr_id| {
-        //                 get_carnage_report(pgcr_id, &client)
-        //             }))
-        //         }))
-        //         .and_then(bind!([client = client.clone()], |pgcrs: futures::stream::FuturesUnordered<_>| {
-        //         // diverge to hopefully concurrent processing
-        //             pgcrs.and_then(bind!([client = client.clone()], |pgcr: Pgcr| {
-        //                 let my_team: Team = pgcr.stats.iter().find(|&&stat| stat.id == id.unwrap()).unwrap().team;
-        //                 let stats = pgcr.stats.clone();
-        //                 join_all(stats.into_iter().filter(|stat: &PlayerInstanceStats| stat.team != my_team).collect::<Vec<_>>().into_iter().map(bind!([pgcr = pgcr.clone(), client = client.clone()], |stat: PlayerInstanceStats| {
-        //                     get_account_name(PlatformType::Psn, stat.id, &client).map(bind!([pgcr = pgcr.clone(), stat], |name| {
-        //                         format!("Game {}, Player {}: {:.*}", pgcr.time, name, 2, stat.kda())
-        //                     }))
-        //                 })))
-        //             })).collect()
-        //         }))
-            // }))
-        // });
-        // println!("----");
-        let stats = core.run(work).unwrap();
-        println!("{:?}", stats);
-        // for game in stats {
-        //     for s in game {
-        //         println!("{:?}", s);
-        //     }
-        //     println!("====");
-        // }
+    let server_handle = core.handle();
+    let client_handle = core.handle();
+    let serve = hyper::server::Http::new().serve_addr_handle(&addr, &server_handle, move || {
+        Ok(Carry{handle: client_handle.clone()})
+    }).unwrap();
+    let h2 = server_handle.clone();
+    server_handle.spawn(serve.for_each(move |conn| {
+        h2.spawn(conn.map(|_| ()).map_err(|err| println!("serve err: {:?}", err)));
+        Ok(())
+    }).map_err(|_| ()));
+    core.run(futures::future::empty::<(), ()>()).unwrap();
 }
