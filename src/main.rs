@@ -176,7 +176,7 @@ const TRIALS_GAME_IDS_KEY: MemoizeKey<(PlatformType, AccountId, CharacterId), Ve
 #[async]
 fn get_trials_game_ids(platform: PlatformType, account: AccountId, character: CharacterId, client: Client<impl Connect>) -> hyper::Result<Vec<PgcrId>> {
     // println!("Getting PgcrIDs for {:?}", character);
-    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=11&mode=39", 
+    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=6&mode=39", 
         membershipType=platform as u8, 
         destinyMembershipId = account, 
         characterId = character);
@@ -303,7 +303,6 @@ const ACCOUNT_STATS_KEY: MemoizeKey<(PlatformType, AccountId), PlayerStats, hype
 fn get_account_stats(platform: PlatformType, account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<PlayerStats> {
     // println!("Getting PlayerInstanceStats for {:?}", account_id );
     let character_ids = await!(get_character_ids(platform, account_id, client.clone()))?;
-    println!("ids");
     let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform as u8, destinyMembershipId=account_id, characterId=character_ids[0]);
     let mut req = Request::new(Method::Get, url.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
@@ -352,7 +351,7 @@ fn get_account_name(platform: PlatformType, account_id: AccountId, client: Clien
 
 #[async]
 fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<f64> {
-    return Ok(200.0);
+    Ok(200.0)
     // let url = format!("https://api.guardian.gg/v2/players/{}?lc=en", account_id);
     // println!("{}", url);
     // let req = Request::new(Method::Get, url.parse().unwrap());
@@ -394,6 +393,29 @@ fn make_carry_judgement<'a>(inputs: &Vec<InferenceInput>, classifiers: &HashMap<
 
 fn tttt(input: &Vec<InferenceInput>) -> bool {
     true
+}
+
+fn games_fn(input: &Vec<InferenceInput>) -> bool {
+    let mut max_games = u64::min_value();
+    let mut min_games = u64::max_value();
+    for i in input {
+        max_games = std::cmp::max(max_games, i.total_games);
+        min_games = std::cmp::min(min_games, i.total_games);
+
+    }
+    println!("max {:?}", max_games);
+    println!("min {:?}", min_games);
+    return max_games > (min_games * 1.5 as u64);
+}
+
+fn elo_fn(input: &Vec<InferenceInput>) -> bool {
+    let mut max_elo = std::f64::MIN;
+    let mut min_elo = std::f64::MAX;
+    for i in input {
+        max_elo = max_elo.max(i.elo);
+        min_elo = max_elo.min(i.elo);
+    }
+    return max_elo > (min_elo * 2 as f64);
 }
 
 #[async]
@@ -440,7 +462,9 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
         // println!("----");
 
         let mut classifiers: HashMap<&'static str, &Fn(&Vec<InferenceInput>) -> bool> = HashMap::new();
-        classifiers.insert("test", &tttt);
+        // classifiers.insert("test", &tttt);
+        classifiers.insert("games played", &games_fn);
+        classifiers.insert("ELO", &elo_fn);
         let judgements = make_carry_judgement(&inputs, &classifiers);
         results.push((opponents_gamertags, judgements));
 
