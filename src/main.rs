@@ -18,6 +18,8 @@ extern crate hyper;
 extern crate serde_derive;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate maplit;
 
 extern crate futures_await as futures;
 extern crate hyper_tls;
@@ -30,9 +32,8 @@ use std::fmt::{Display, Formatter, Error};
 use std::io::{self, Write};
 use std::result::{Result};
 use std::option::{Option};
-use std::io::{BufRead};
 use std::str::{FromStr};
-use std::sync::{Arc};
+use std::collections::{HashMap};
 
 use futures::{Future, Stream};
 use futures::prelude::{async, await};
@@ -50,6 +51,15 @@ use chrono::{DateTime, Utc};
 
 use num::cast::{FromPrimitive};
 
+use maplit::{hashmap};
+
+#[derive(Copy, Clone, Debug)]
+struct InferenceInput {
+    kd: f64,
+    total_games: u64,
+    elo: f64,
+}
+
 struct Carry {
     handle: tokio_core::reactor::Handle,
 }
@@ -62,15 +72,14 @@ impl Service for Carry {
 
     fn call(&self, req: Request) -> Self::Future {
         let client = Client::configure()
-        .connector(HttpsConnector::new(4, &self.handle).unwrap())
-        .build(&self.handle);
+            .connector(HttpsConnector::new(4, &self.handle).unwrap())
+            .build(&self.handle);
         println!("requested: {:?}", req.uri());
         let gamertag = req.uri().path().split('/').collect::<Vec<&str>>()[1];
         println!("gamertag: {:?}", gamertag);
-        let id_future = get_account_id(PlatformType::Psn, gamertag.into(), client.clone());
-        let stats_future = id_future.and_then(move |id| get_account_stats(PlatformType::Psn, id.unwrap(), client.clone()));
-        Box::new(stats_future.map(|stats| {
-            Response::new().with_body(format!("{:?}", stats))
+        let results_future = run_full(String::from(gamertag), client.clone());
+        Box::new(results_future.map(|results| {
+            Response::new().with_body(format!("{:?}", results))
         }))
     }
 
@@ -165,15 +174,15 @@ fn get_character_ids(platform: PlatformType, account_id: AccountId, client: Clie
 
 const TRIALS_GAME_IDS_KEY: MemoizeKey<(PlatformType, AccountId, CharacterId), Vec<PgcrId>, hyper::Error> = MemoizeKey::new("get_trials_game_ids");
 #[async]
-fn get_trials_game_ids(platform: PlatformType, account: AccountId, character: CharacterId, client: Arc<Client<impl Connect>>) -> hyper::Result<Vec<PgcrId>> {
+fn get_trials_game_ids(platform: PlatformType, account: AccountId, character: CharacterId, client: Client<impl Connect>) -> hyper::Result<Vec<PgcrId>> {
     // println!("Getting PgcrIDs for {:?}", character);
-    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=5&mode=39", 
+    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=11&mode=39", 
         membershipType=platform as u8, 
         destinyMembershipId = account, 
         characterId = character);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
-    await!(memoize(TRIALS_GAME_IDS_KEY, (platform, account, character), client.request(req).and_then(bind!([character], |res: hyper::Response<_>| {
+    await!(memoize(TRIALS_GAME_IDS_KEY, (platform, account, character), client.request(req).and_then(bind!([_character = character], |res: hyper::Response<_>| {
         res.body().concat2().map(move |body| {
             let games = serde_json::from_slice::<Value>(&body)
                 .as_ref().ok()
@@ -187,9 +196,10 @@ fn get_trials_game_ids(platform: PlatformType, account: AccountId, character: Ch
                         .map(|id| id.unwrap())
                         .map(|id| PgcrId(id))
                 }))
+                .map(|ids| ids.skip(1)) // my personal last game ended with DNF
                 .map(|ids| ids.collect())
                 .unwrap_or(vec![]);
-            println!("Games for id: {}: {:?}", character, games);
+            // println!("Games for id: {}: {:?}", character, games);
             games
         })
     }))
@@ -204,7 +214,7 @@ enum Team {
 
 #[derive(Debug, Clone, Copy)]
 struct PlayerInstanceStats {
-    id: AccountId,
+    account_id: AccountId,
     kills: u64,
     deaths: u64,
     assists: u64,
@@ -231,7 +241,7 @@ impl PlayerInstanceStats {
        let assists = get_stat("assists", values).unwrap();
        let team = if values.get("team").and_then(|v| v.get("basic")).and_then(|v| v.get("value")).and_then(|v| v.as_f64()).unwrap() == 16.0 { Team::Alpha } else { Team::Bravo };
         Ok(PlayerInstanceStats{
-            id:  id,
+            account_id:  id,
             kills: kills,
             deaths: deaths,
             assists: assists,
@@ -259,7 +269,7 @@ impl Pgcr {
 
 const CARNAGE_REPORT_KEY: MemoizeKey<PgcrId, Pgcr, hyper::Error> = MemoizeKey::new("get_carnage_report");
 #[async]
-fn get_carnage_report(pgcr_id: PgcrId, client: Arc<Client<impl Connect>>) -> hyper::Result<Pgcr> {
+fn get_carnage_report(pgcr_id: PgcrId, client: Client<impl Connect>) -> hyper::Result<Pgcr> {
     // println!("Getting Pgcr for {:?}", pgcr_id);
     let url = format!("https://www.bungie.net/Platform/Destiny2/Stats/PostGameCarnageReport/{id}/", id=pgcr_id);
     let mut req = Request::new(Method::Get, url.parse().unwrap());
@@ -290,17 +300,17 @@ struct PlayerStats {
 
 const ACCOUNT_STATS_KEY: MemoizeKey<(PlatformType, AccountId), PlayerStats, hyper::Error> = MemoizeKey::new("get_account_stats");
 #[async]
-#[deprecated]
 fn get_account_stats(platform: PlatformType, account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<PlayerStats> {
     // println!("Getting PlayerInstanceStats for {:?}", account_id );
     let character_ids = await!(get_character_ids(platform, account_id, client.clone()))?;
+    println!("ids");
     let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform as u8, destinyMembershipId=account_id, characterId=character_ids[0]);
     let mut req = Request::new(Method::Get, url.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
     let res = await!(client.request(req))?;
     let body = await!(res.body().concat2())?;
-    io::stdout().write_all(&body)?;
-    io::stdout().write_all(&['\n' as u8])?;
+    // io::stdout().write_all(&body)?;
+    // io::stdout().write_all(&['\n' as u8])?;
     let stats = serde_json::from_slice::<Value>(&body)
         .as_ref().ok()
         .and_then(|v| v.get("Response"))
@@ -313,13 +323,13 @@ fn get_account_stats(platform: PlatformType, account_id: AccountId, client: Clie
                 get_stat::<u64>("deaths", stats_base).unwrap(),
                 get_stat::<u64>("activitiesEntered", stats_base).unwrap(),
             )
-        }).unwrap();
+        }).unwrap_or((0, 0, 0, 0));
     Ok(PlayerStats{account_id: account_id, total_games: stats.3, kills: stats.0, assists: stats.1, deaths: stats.2})
 }
 
 const ACCOUNT_NAME_KEY: MemoizeKey<(PlatformType, AccountId), String, hyper::Error> = MemoizeKey::new("get_account_name");
 #[async]
-fn get_account_name(platform: PlatformType, account_id: AccountId, client: Arc<Client<impl Connect>>) -> hyper::Result<String> {
+fn get_account_name(platform: PlatformType, account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<String> {
     let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Profile/{destinyMembershipId}/?components=100",membershipType=platform as u8, destinyMembershipId=account_id);
     let mut req = Request::new(Method::Get, url.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
@@ -342,23 +352,101 @@ fn get_account_name(platform: PlatformType, account_id: AccountId, client: Arc<C
 
 #[async]
 fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<f64> {
-    let url = format!("https://api.guardian.gg/v2/players/{}?lc=en", account_id);
-    println!("{}", url);
-    let req = Request::new(Method::Get, url.parse().unwrap());
-    await!(client.request(req).and_then(|res| {
-        res.body().concat2().map(|body| {
-            serde_json::from_slice::<Value>(&body)
-                .as_ref().ok()
-                .and_then(|v| v.get("player"))
-                .and_then(|v| v.get("stats"))
-                .and_then(|v| v.as_array())
-                .and_then(|a| a.iter().find(|v| v.as_object().unwrap().get("mode").unwrap().as_u64().unwrap() == 39))
-                .and_then(|v| v.as_object())
-                .and_then(|v| v.get("elo"))
-                .and_then(|e| e.as_f64())
-                .unwrap()
-        })
-    }))
+    return Ok(200.0);
+    // let url = format!("https://api.guardian.gg/v2/players/{}?lc=en", account_id);
+    // println!("{}", url);
+    // let req = Request::new(Method::Get, url.parse().unwrap());
+    // await!(client.request(req).and_then(|res| {
+    //     res.body().concat2().map(|body| {
+    //         serde_json::from_slice::<Value>(&body)
+    //             .as_ref().ok()
+    //             .and_then(|v| v.get("player"))
+    //             .and_then(|v| v.get("stats"))
+    //             .and_then(|v| v.as_array())
+    //             .and_then(|a| a.iter().find(|v| v.as_object().unwrap().get("mode").unwrap().as_u64().unwrap() == 39))
+    //             .and_then(|v| v.as_object())
+    //             .and_then(|v| v.get("elo"))
+    //             .and_then(|e| e.as_f64())
+    //             .unwrap()
+    //     })
+    // }))
+}
+
+#[async]
+fn get_inference_input(platform: PlatformType, account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<InferenceInput> {
+    let lifetime_stats = await!(get_account_stats(platform, account_id, client.clone()))?;
+    // println!("stats");
+    let elo = await!(get_elo(account_id, client.clone()))?;
+    // println!("elo");
+    Ok(InferenceInput{kd: lifetime_stats.kills as f64 / lifetime_stats.deaths as f64, total_games: lifetime_stats.total_games, elo: elo})
+}
+
+fn make_carry_judgement<'a>(inputs: &Vec<InferenceInput>, classifiers: &HashMap<&'a str, &Fn(&Vec<InferenceInput>) -> bool>) -> Vec<&'a str> {
+    let mut reasons = vec![];
+    for (name, f) in classifiers {
+        let result = f(inputs);
+        if result {
+            reasons.push(*name);
+        }
+    }
+    reasons
+}
+
+fn tttt(input: &Vec<InferenceInput>) -> bool {
+    true
+}
+
+#[async]
+fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec<(Vec<String>, Vec<&'static str>)>> {
+    let mut results = vec![];
+    let account_id = await!(get_account_id(PlatformType::Psn, gamertag, client.clone()))?.unwrap();
+    let character_ids = await!(get_character_ids(PlatformType::Psn, account_id, client.clone()))?;
+    // println!("{:?}", character_ids);
+    let mut games = vec![];
+    for character_id in character_ids {
+        // println!("{:?}", character_id);
+        let gs = await!(get_trials_game_ids(PlatformType::Psn, account_id, character_id, client.clone()))?;
+        games.extend(gs);
+    }
+    // println!("{:?}", games);
+    let mut pgcrs = vec![];
+    for game in games {
+        let pgcr = await!(get_carnage_report(game, client.clone()))?;
+        pgcrs.push(pgcr);
+    }
+
+    // println!("{:?}", pgcrs);
+
+    for pgcr in pgcrs {
+        let my_team = pgcr.stats.iter().find(|s| s.account_id == account_id).unwrap().team;
+        let other_team = match my_team {
+            Team::Alpha => Team::Bravo,
+            Team::Bravo => Team::Alpha,
+        };
+
+        let opponents_ids = pgcr.stats.iter().filter(|s| s.team == other_team).map(|s| s.account_id).collect::<Vec<_>>();
+        let mut opponents_gamertags = vec![];
+        let mut inputs = vec![];
+        // println!("{:?}", opponents_ids);
+        for id in opponents_ids {
+            let gamertag = await!(get_account_name(PlatformType::Psn, id, client.clone())).unwrap();
+            // println!("{:?}", gamertag);
+            // println!("{:?}", opponents_gamertags);
+            let input = await!(get_inference_input(PlatformType::Psn, id, client.clone())).expect("inferene input");
+            // println!("{:?}", input);
+            inputs.push(input);
+            opponents_gamertags.push(gamertag);
+        }
+        // println!("----");
+
+        let mut classifiers: HashMap<&'static str, &Fn(&Vec<InferenceInput>) -> bool> = HashMap::new();
+        classifiers.insert("test", &tttt);
+        let judgements = make_carry_judgement(&inputs, &classifiers);
+        results.push((opponents_gamertags, judgements));
+
+    }
+
+    Ok(results)
 }
 
 fn main() {
