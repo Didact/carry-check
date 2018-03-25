@@ -38,7 +38,7 @@ use std::collections::{HashMap};
 use futures::{Future, Stream};
 use futures::prelude::{async, await};
 
-use hyper::{Client, Request, Method};
+use hyper::{Client, Request, Method, StatusCode};
 use hyper::client::{Connect};
 use hyper::server::{Service, Response};
 use hyper_tls::{HttpsConnector};
@@ -75,11 +75,23 @@ impl Service for Carry {
             .connector(HttpsConnector::new(4, &self.handle).unwrap())
             .build(&self.handle);
         println!("requested: {:?}", req.uri());
-        let gamertag = req.uri().path().split('/').collect::<Vec<&str>>()[1];
+        let mut response = Response::new();
+        match (req.method(), req.path().split('/').nth(1)) {
+            (&Method::Get, Option::Some("search")) => {
+
+            }
+            (a, b) => {
+                println!("{:?}", b);
+                response.set_status(StatusCode::NotFound);
+                return Box::new(futures::future::ok(response));
+            }
+        };
+        let gamertag = req.uri().path().split('/').nth(2).unwrap();
         println!("gamertag: {:?}", gamertag);
         let results_future = run_full(String::from(gamertag), client.clone());
         Box::new(results_future.map(|results| {
-            Response::new().with_body(serde_json::to_vec(&results).unwrap())
+            response.set_body(serde_json::to_vec(&results).unwrap());
+            response
         }))
     }
 
