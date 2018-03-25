@@ -79,7 +79,7 @@ impl Service for Carry {
         println!("gamertag: {:?}", gamertag);
         let results_future = run_full(String::from(gamertag), client.clone());
         Box::new(results_future.map(|results| {
-            Response::new().with_body(format!("{:?}", results))
+            Response::new().with_body(serde_json::to_vec(&results).unwrap())
         }))
     }
 
@@ -418,8 +418,14 @@ fn elo_fn(input: &Vec<InferenceInput>) -> bool {
     return max_elo > (min_elo * 2 as f64);
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct FullResult {
+    opponents: Vec<String>,
+    judgements: Vec<&'static str>,
+}
+
 #[async]
-fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec<(Vec<String>, Vec<&'static str>)>> {
+fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec<FullResult>> {
     let mut results = vec![];
     let account_id = await!(get_account_id(PlatformType::Psn, gamertag, client.clone()))?.unwrap();
     let character_ids = await!(get_character_ids(PlatformType::Psn, account_id, client.clone()))?;
@@ -466,7 +472,7 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
         classifiers.insert("games played", &games_fn);
         classifiers.insert("ELO", &elo_fn);
         let judgements = make_carry_judgement(&inputs, &classifiers);
-        results.push((opponents_gamertags, judgements));
+        results.push(FullResult{opponents: opponents_gamertags, judgements});
 
     }
 
