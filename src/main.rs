@@ -74,14 +74,14 @@ impl Service for Carry {
         let client = Client::configure()
             .connector(HttpsConnector::new(4, &self.handle).unwrap())
             .build(&self.handle);
-        println!("requested: {:?}", req.uri());
+        // println!("requested: {:?}", req.uri());
         let mut response = Response::new();
         match (req.method(), req.path().split('/').nth(1)) {
             (&Method::Get, Option::Some("search")) => {
 
             }
-            (a, b) => {
-                println!("{:?}", b);
+            _ => {
+                // println!("{:?}", b);
                 response.set_status(StatusCode::NotFound);
                 return Box::new(futures::future::ok(response));
             }
@@ -367,14 +367,14 @@ fn get_account_name(platform: PlatformType, account_id: AccountId, client: Clien
             })
     })))
 }
-
+const ELO_KEY: MemoizeKey<AccountId, f64, hyper::Error> = MemoizeKey::new("get_elo");
 #[async]
 fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<f64> {
     Ok(200.0)
     // let url = format!("https://api.guardian.gg/v2/players/{}?lc=en", account_id);
     // println!("{}", url);
     // let req = Request::new(Method::Get, url.parse().unwrap());
-    // await!(client.request(req).and_then(|res| {
+    // await!(memoize(ELO_KEY, account_id, client.request(req).and_then(|res| {
     //     res.body().concat2().map(|body| {
     //         serde_json::from_slice::<Value>(&body)
     //             .as_ref().ok()
@@ -385,9 +385,9 @@ fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result
     //             .and_then(|v| v.as_object())
     //             .and_then(|v| v.get("elo"))
     //             .and_then(|e| e.as_f64())
-    //             .unwrap()
+    //             .unwrap_or(1200.0)
     //     })
-    // }))
+    // })))
 }
 
 #[async]
@@ -410,8 +410,20 @@ fn make_carry_judgement<'a>(inputs: &Vec<InferenceInput>, classifiers: &HashMap<
     reasons
 }
 
-fn tttt(input: &Vec<InferenceInput>) -> bool {
-    true
+fn kd_fn(input: &Vec<InferenceInput>) -> bool {
+    let mut max_kd = std::f64::MIN;
+    let mut min_kd = std::f64::MAX;
+    for i in input {
+        max_kd = max_kd.max(i.kd);
+        min_kd = min_kd.min(i.kd);
+    }
+    if max_kd < 0.0 {
+        // something went wrong
+        return false;
+    }
+    println!("max kd {:?}", max_kd);
+    println!("min kd {:?}", min_kd);
+    return max_kd > (1.5 * min_kd);
 }
 
 fn games_fn(input: &Vec<InferenceInput>) -> bool {
@@ -422,9 +434,13 @@ fn games_fn(input: &Vec<InferenceInput>) -> bool {
         min_games = std::cmp::min(min_games, i.total_games);
 
     }
-    println!("max {:?}", max_games);
-    println!("min {:?}", min_games);
-    return max_games > (min_games * 1.5 as u64);
+    if max_games == 0 {
+        // something went wrong
+        return false;
+    }
+    println!("max games {:?}", max_games);
+    println!("min games {:?}", min_games);
+    return min_games < 50 && max_games > 100;
 }
 
 fn elo_fn(input: &Vec<InferenceInput>) -> bool {
@@ -440,6 +456,7 @@ fn elo_fn(input: &Vec<InferenceInput>) -> bool {
 #[derive(Debug, Clone, Serialize)]
 struct FullResult {
     opponents: Vec<String>,
+    confidence: f64,
     judgements: Vec<&'static str>,
 }
 
@@ -490,8 +507,10 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
         // classifiers.insert("test", &tttt);
         classifiers.insert("games played", &games_fn);
         classifiers.insert("ELO", &elo_fn);
+        classifiers.insert("KD", &kd_fn);
         let judgements = make_carry_judgement(&inputs, &classifiers);
-        results.push(FullResult{opponents: opponents_gamertags, judgements});
+        let confidence = judgements.len() as f64 / classifiers.len() as f64;
+        results.push(FullResult{opponents: opponents_gamertags, confidence, judgements});
 
     }
 
