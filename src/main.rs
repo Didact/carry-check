@@ -315,27 +315,34 @@ const ACCOUNT_STATS_KEY: MemoizeKey<(PlatformType, AccountId), PlayerStats, hype
 fn get_account_stats(platform: PlatformType, account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<PlayerStats> {
     // println!("Getting PlayerInstanceStats for {:?}", account_id );
     let character_ids = await!(get_character_ids(platform, account_id, client.clone()))?;
-    let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform as u8, destinyMembershipId=account_id, characterId=character_ids[0]);
-    let mut req = Request::new(Method::Get, url.parse().unwrap());
-    req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
-    let res = await!(client.request(req))?;
-    let body = await!(res.body().concat2())?;
-    // io::stdout().write_all(&body)?;
-    // io::stdout().write_all(&['\n' as u8])?;
-    let stats = serde_json::from_slice::<Value>(&body)
-        .as_ref().ok()
-        .and_then(|v| v.get("Response"))
-        .and_then(|v| v.get("trialsofthenine"))
-        .and_then(|v| v.get("allTime"))
-        .map(|stats_base| {
-            (
-                get_stat::<u64>("kills", stats_base).unwrap(),
-                get_stat::<u64>("assists", stats_base).unwrap(),
-                get_stat::<u64>("deaths", stats_base).unwrap(),
-                get_stat::<u64>("activitiesEntered", stats_base).unwrap(),
-            )
-        }).unwrap_or((0, 0, 0, 0));
-    Ok(PlayerStats{account_id: account_id, total_games: stats.3, kills: stats.0, assists: stats.1, deaths: stats.2})
+    let mut player_stats = PlayerStats{account_id, assists: 0, deaths: 0, kills: 0, total_games: 0};
+    for character_id in character_ids {
+        let url = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/?modes=39", membershipType=platform as u8, destinyMembershipId=account_id, characterId=character_id);
+        let mut req = Request::new(Method::Get, url.parse().unwrap());
+        req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
+        let res = await!(client.request(req))?;
+        let body = await!(res.body().concat2())?;
+        // io::stdout().write_all(&body)?;
+        // io::stdout().write_all(&['\n' as u8])?;
+        let stats = serde_json::from_slice::<Value>(&body)
+            .as_ref().ok()
+            .and_then(|v| v.get("Response"))
+            .and_then(|v| v.get("trialsofthenine"))
+            .and_then(|v| v.get("allTime"))
+            .map(|stats_base| {
+                (
+                    get_stat::<u64>("kills", stats_base).unwrap(),
+                    get_stat::<u64>("assists", stats_base).unwrap(),
+                    get_stat::<u64>("deaths", stats_base).unwrap(),
+                    get_stat::<u64>("activitiesEntered", stats_base).unwrap(),
+                )
+            }).unwrap_or((0, 0, 0, 0));
+            player_stats.total_games += stats.3;
+            player_stats.kills += stats.0;
+            player_stats.assists = stats.1;
+            player_stats.deaths += stats.2;
+    }
+    Ok(player_stats)
 }
 
 const ACCOUNT_NAME_KEY: MemoizeKey<(PlatformType, AccountId), String, hyper::Error> = MemoizeKey::new("get_account_name");
