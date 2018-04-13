@@ -55,6 +55,7 @@ use maplit::{hashmap};
 
 #[derive(Copy, Clone, Debug)]
 struct InferenceInput {
+    account_id: AccountId,
     kd: f64,
     total_games: u64,
     elo: f64,
@@ -186,12 +187,13 @@ fn get_character_ids(platform: PlatformType, account_id: AccountId, client: Clie
 
 const TRIALS_GAME_IDS_KEY: MemoizeKey<(PlatformType, AccountId, CharacterId), Vec<PgcrId>, hyper::Error> = MemoizeKey::new("get_trials_game_ids");
 #[async]
-fn get_trials_game_ids(platform: PlatformType, account: AccountId, character: CharacterId, client: Client<impl Connect>) -> hyper::Result<Vec<PgcrId>> {
+fn get_trials_game_ids(platform: PlatformType, account: AccountId, character: CharacterId, count: u64, client: Client<impl Connect>) -> hyper::Result<Vec<PgcrId>> {
     // println!("Getting PgcrIDs for {:?}", character);
-    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count=6&mode=39", 
+    let uri = format!("https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{destinyMembershipId}/Character/{characterId}/Stats/Activities/?count={count}&mode=39", 
         membershipType=platform as u8, 
         destinyMembershipId = account, 
-        characterId = character);
+        characterId = character,
+        count = count);
     let mut req = Request::new(Method::Get, uri.parse().unwrap());
     req.headers_mut().set(XBnetApiHeader(API_KEY.clone()));
     await!(memoize(TRIALS_GAME_IDS_KEY, (platform, account, character), client.request(req).and_then(bind!([_character = character], |res: hyper::Response<_>| {
@@ -394,23 +396,25 @@ fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result
 fn get_inference_input(platform: PlatformType, account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<InferenceInput> {
     let lifetime_stats = await!(get_account_stats(platform, account_id, client.clone()))?;
     // println!("stats");
-    let elo = await!(get_elo(account_id, client.clone()))?;
-    // println!("elo");
-    Ok(InferenceInput{kd: lifetime_stats.kills as f64 / lifetime_stats.deaths as f64, total_games: lifetime_stats.total_games, elo: elo})
+    let elo = 200.0; //await!(get_elo(account_id, client.clone()))?;
+    println!("{:?}", elo);
+    Ok(InferenceInput{account_id, kd: lifetime_stats.kills as f64 / lifetime_stats.deaths as f64, total_games: lifetime_stats.total_games, elo: elo})
 }
 
-fn make_carry_judgement<'a>(inputs: &Vec<InferenceInput>, classifiers: &HashMap<&'a str, &Fn(&Vec<InferenceInput>) -> bool>) -> Vec<&'a str> {
-    let mut reasons = vec![];
-    for (name, f) in classifiers {
-        let result = f(inputs);
-        if result {
-            reasons.push(*name);
+fn make_carry_judgement<'a>(inputs: &Vec<InferenceInput>, classifiers: &HashMap<&'a str, &Fn(&Vec<InferenceInput>) -> Vec<AccountId>>) -> Vec<(AccountId, Vec<&'a str>)> {
+    let mut reasons = HashMap::new();
+    for (&name, f) in classifiers {
+        let results = f(inputs);
+        if !results.is_empty() {
+            for result in results {
+                reasons.entry(result).or_insert(vec![]).push(name);
+            }
         }
     }
-    reasons
+    return reasons.into_iter().map(|(k, v)| (k, v)).collect();
 }
 
-fn kd_fn(input: &Vec<InferenceInput>) -> bool {
+fn kd_fn(input: &Vec<InferenceInput>) -> Vec<AccountId> {
     let mut max_kd = std::f64::MIN;
     let mut min_kd = std::f64::MAX;
     for i in input {
@@ -419,14 +423,14 @@ fn kd_fn(input: &Vec<InferenceInput>) -> bool {
     }
     if max_kd < 0.0 {
         // something went wrong
-        return false;
+        return vec![]
     }
     println!("max kd {:?}", max_kd);
     println!("min kd {:?}", min_kd);
-    return max_kd > (1.5 * min_kd);
+    input.iter().filter(|i| i.kd > 1.5 * min_kd).map(|i| i.account_id).collect()
 }
 
-fn games_fn(input: &Vec<InferenceInput>) -> bool {
+fn games_fn(input: &Vec<InferenceInput>) -> Vec<AccountId> {
     let mut max_games = u64::min_value();
     let mut min_games = u64::max_value();
     for i in input {
@@ -436,28 +440,34 @@ fn games_fn(input: &Vec<InferenceInput>) -> bool {
     }
     if max_games == 0 {
         // something went wrong
-        return false;
+        return vec![]
     }
     println!("max games {:?}", max_games);
     println!("min games {:?}", min_games);
-    return min_games < 50 && max_games > 100;
+    if min_games < 50 && max_games > 100 {
+        // everyone over 100 is a carrier
+        return input.iter().filter(|i| i.total_games > 100).map(|i| i.account_id).collect()
+    }
+    vec![]
 }
 
-fn elo_fn(input: &Vec<InferenceInput>) -> bool {
-    let mut max_elo = std::f64::MIN;
-    let mut min_elo = std::f64::MAX;
-    for i in input {
-        max_elo = max_elo.max(i.elo);
-        min_elo = max_elo.min(i.elo);
-    }
-    return max_elo > (min_elo * 2 as f64);
-}
+// fn elo_fn(input: &Vec<InferenceInput>) -> Vec<String> {
+//     let mut max_elo = std::f64::MIN;
+//     let mut min_elo = std::f64::MAX;
+//     for i in input {
+//         max_elo = max_elo.max(i.elo);
+//         min_elo = max_elo.min(i.elo);
+//     }
+//     return max_elo > (min_elo * 2 as f64);
+// }
 
 #[derive(Debug, Clone, Serialize)]
 struct FullResult {
     opponents: Vec<String>,
-    confidence: f64,
-    judgements: Vec<&'static str>,
+    judgements: HashMap<String, Vec<&'static str>>,
+    time: DateTime<Utc>,
+    num_categories: usize,
+    won: bool,
 }
 
 #[async]
@@ -469,7 +479,7 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
     let mut games = vec![];
     for character_id in character_ids {
         // println!("{:?}", character_id);
-        let gs = await!(get_trials_game_ids(PlatformType::Psn, account_id, character_id, client.clone()))?;
+        let gs = await!(get_trials_game_ids(PlatformType::Psn, account_id, character_id, 2, client.clone()))?;
         games.extend(gs);
     }
     // println!("{:?}", games);
@@ -489,28 +499,37 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
         };
 
         let opponents_ids = pgcr.stats.iter().filter(|s| s.team == other_team).map(|s| s.account_id).collect::<Vec<_>>();
+        if opponents_ids.is_empty() {
+            continue;
+        }
+
+        let mut gamertags_map = HashMap::new();
+
         let mut opponents_gamertags = vec![];
         let mut inputs = vec![];
+
         // println!("{:?}", opponents_ids);
         for id in opponents_ids {
             let gamertag = await!(get_account_name(PlatformType::Psn, id, client.clone())).unwrap();
+            gamertags_map.insert(id, gamertag.clone());
             // println!("{:?}", gamertag);
             // println!("{:?}", opponents_gamertags);
-            let input = await!(get_inference_input(PlatformType::Psn, id, client.clone())).expect("inferene input");
+            let input = await!(get_inference_input(PlatformType::Psn, id, client.clone()))?;
             // println!("{:?}", input);
             inputs.push(input);
             opponents_gamertags.push(gamertag);
         }
+
         // println!("----");
 
-        let mut classifiers: HashMap<&'static str, &Fn(&Vec<InferenceInput>) -> bool> = HashMap::new();
+        let mut classifiers: HashMap<&'static str, &Fn(&Vec<InferenceInput>) -> Vec<AccountId>> = HashMap::new();
         // classifiers.insert("test", &tttt);
-        classifiers.insert("games played", &games_fn);
-        classifiers.insert("ELO", &elo_fn);
-        classifiers.insert("KD", &kd_fn);
-        let judgements = make_carry_judgement(&inputs, &classifiers);
-        let confidence = judgements.len() as f64 / classifiers.len() as f64;
-        results.push(FullResult{opponents: opponents_gamertags, confidence, judgements});
+        classifiers.insert("games", &games_fn);
+        // classifiers.insert("ELO", &elo_fn);
+        classifiers.insert("kd", &kd_fn);
+        let judgements = make_carry_judgement(&inputs, &classifiers).into_iter().map(|(k, v)| (gamertags_map[&k].clone(), v)).collect();
+        results.push(FullResult{opponents: opponents_gamertags, judgements, time: pgcr.time, won: pgcr.winner == my_team, num_categories: classifiers.len()});
+        println!("iteration");
 
     }
 
@@ -518,7 +537,7 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
 }
 
 fn main() {
-    let addr = "127.0.0.1:3001".parse().unwrap();
+    let addr = "127.0.0.1:3002".parse().unwrap();
     let mut core = Core::new().unwrap();
     let server_handle = core.handle();
     let client_handle = core.handle();
