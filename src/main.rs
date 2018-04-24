@@ -50,6 +50,7 @@ use serde_json::{Value};
 use chrono::{DateTime, Utc};
 
 use num::cast::{FromPrimitive};
+use std::sync::{Mutex};
 
 use maplit::{hashmap};
 
@@ -372,24 +373,24 @@ fn get_account_name(platform: PlatformType, account_id: AccountId, client: Clien
 const ELO_KEY: MemoizeKey<AccountId, f64, hyper::Error> = MemoizeKey::new("get_elo");
 #[async]
 fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<f64> {
-    Ok(200.0)
-    // let url = format!("https://api.guardian.gg/v2/players/{}?lc=en", account_id);
-    // println!("{}", url);
-    // let req = Request::new(Method::Get, url.parse().unwrap());
-    // await!(memoize(ELO_KEY, account_id, client.request(req).and_then(|res| {
-    //     res.body().concat2().map(|body| {
-    //         serde_json::from_slice::<Value>(&body)
-    //             .as_ref().ok()
-    //             .and_then(|v| v.get("player"))
-    //             .and_then(|v| v.get("stats"))
-    //             .and_then(|v| v.as_array())
-    //             .and_then(|a| a.iter().find(|v| v.as_object().unwrap().get("mode").unwrap().as_u64().unwrap() == 39))
-    //             .and_then(|v| v.as_object())
-    //             .and_then(|v| v.get("elo"))
-    //             .and_then(|e| e.as_f64())
-    //             .unwrap_or(1200.0)
-    //     })
-    // })))
+    // Ok(200.0)
+    let url = format!("https://api.guardian.gg/v2/players/{}?lc=en", account_id);
+    println!("{}", url);
+    let req = Request::new(Method::Get, url.parse().unwrap());
+    await!(memoize(ELO_KEY, account_id, client.request(req).and_then(|res| {
+        res.body().concat2().map(|body| {
+            serde_json::from_slice::<Value>(&body)
+                .as_ref().ok()
+                .and_then(|v| v.get("player"))
+                .and_then(|v| v.get("stats"))
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.iter().find(|v| v.as_object().unwrap().get("mode").unwrap().as_u64().unwrap() == 39))
+                .and_then(|v| v.as_object())
+                .and_then(|v| v.get("elo"))
+                .and_then(|e| e.as_f64())
+                .unwrap_or(1200.0)
+        })
+    })))
 }
 
 #[async]
@@ -397,7 +398,7 @@ fn get_inference_input(platform: PlatformType, account_id: AccountId, client: Cl
     let lifetime_stats = await!(get_account_stats(platform, account_id, client.clone()))?;
     // println!("stats");
     let elo = 200.0; //await!(get_elo(account_id, client.clone()))?;
-    println!("{:?}", elo);
+    // println!("{:?}", elo);
     Ok(InferenceInput{account_id, kd: lifetime_stats.kills as f64 / lifetime_stats.deaths as f64, total_games: lifetime_stats.total_games, elo: elo})
 }
 
@@ -451,15 +452,15 @@ fn games_fn(input: &Vec<InferenceInput>) -> Vec<AccountId> {
     vec![]
 }
 
-// fn elo_fn(input: &Vec<InferenceInput>) -> Vec<String> {
-//     let mut max_elo = std::f64::MIN;
-//     let mut min_elo = std::f64::MAX;
-//     for i in input {
-//         max_elo = max_elo.max(i.elo);
-//         min_elo = max_elo.min(i.elo);
-//     }
-//     return max_elo > (min_elo * 2 as f64);
-// }
+fn elo_fn(input: &Vec<InferenceInput>) -> Vec<AccountId> {
+    let mut max_elo = std::f64::MIN;
+    let mut min_elo = std::f64::MAX;
+    for i in input {
+        max_elo = max_elo.max(i.elo);
+        min_elo = max_elo.min(i.elo);
+    }
+    return input.iter().filter(|i| (i.elo - min_elo) > 300.0).map(|i| i.account_id).collect();
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct FullResult {
@@ -473,13 +474,14 @@ struct FullResult {
 #[async]
 fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec<FullResult>> {
     let mut results = vec![];
+
     let account_id = await!(get_account_id(PlatformType::Psn, gamertag, client.clone()))?.unwrap();
     let character_ids = await!(get_character_ids(PlatformType::Psn, account_id, client.clone()))?;
     // println!("{:?}", character_ids);
     let mut games = vec![];
     for character_id in character_ids {
         // println!("{:?}", character_id);
-        let gs = await!(get_trials_game_ids(PlatformType::Psn, account_id, character_id, 2, client.clone()))?;
+        let gs = await!(get_trials_game_ids(PlatformType::Psn, account_id, character_id, 25, client.clone()))?;
         games.extend(gs);
     }
     // println!("{:?}", games);
@@ -534,6 +536,7 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
     }
 
     Ok(results)
+
 }
 
 fn main() {
