@@ -1,6 +1,4 @@
 #![feature(const_fn)]
-#![feature(universal_impl_trait)]
-#![feature(conservative_impl_trait)]
 #![feature(nll)]
 #![feature(proc_macro)]
 #![feature(generators)]
@@ -27,14 +25,13 @@ extern crate chrono;
 extern crate num;
 
 use std::fmt::{Display, Formatter, Error};
-use std::io::{self, Write};
 use std::result::{Result};
 use std::option::{Option};
 use std::str::{FromStr};
 use std::collections::{HashMap};
 
 use futures::{Future, Stream};
-use futures::prelude::{async, await};
+use futures::prelude::{async, await, async_stream, stream_yield};
 
 use hyper::{Client, Request, Method, StatusCode};
 use hyper::client::{Connect};
@@ -50,8 +47,6 @@ use chrono::{DateTime, Utc};
 use num::cast::{FromPrimitive};
 use std::sync::{Mutex};
 
-use maplit::{hashmap};
-
 #[derive(Copy, Clone, Debug)]
 struct InferenceInput {
     account_id: AccountId,
@@ -66,7 +61,7 @@ struct Carry {
 
 impl Service for Carry {
     type Request = Request;
-    type Response = Response;
+    type Response = Response<Box<Stream<Item=hyper::Chunk, Error=Self::Error>>>;
     type Error = hyper::Error;
     type Future = Box<Future<Item=Self::Response, Error=Self::Error>>;
 
@@ -88,11 +83,8 @@ impl Service for Carry {
         };
         let gamertag = req.uri().path().split('/').nth(2).unwrap();
         println!("gamertag: {:?}", gamertag);
-        let results_future = run_full(String::from(gamertag), client.clone());
-        Box::new(results_future.map(|results| {
-            response.set_body(serde_json::to_vec(&results).unwrap());
-            response
-        }))
+        let results = run_full(String::from(gamertag), client.clone());
+        Box::new(futures::future::ok(Response::new().with_body(results_to_chunks(results))))
     }
 
 }
@@ -469,9 +461,8 @@ struct FullResult {
     won: bool,
 }
 
-#[async]
-fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec<FullResult>> {
-    let mut results = vec![];
+#[async_stream(item = FullResult)]
+fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<()> {
 
     let account_id = await!(get_account_id(PlatformType::Psn, gamertag, client.clone()))?.unwrap();
     let character_ids = await!(get_character_ids(PlatformType::Psn, account_id, client.clone()))?;
@@ -528,13 +519,22 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<Vec
         // classifiers.insert("ELO", &elo_fn);
         classifiers.insert("kd", &kd_fn);
         let judgements = make_carry_judgement(&inputs, &classifiers).into_iter().map(|(k, v)| (gamertags_map[&k].clone(), v)).collect();
-        results.push(FullResult{opponents: opponents_gamertags, judgements, time: pgcr.time, won: pgcr.winner == my_team, num_categories: classifiers.len()});
+        stream_yield!(FullResult{opponents: opponents_gamertags, judgements, time: pgcr.time, won: pgcr.winner == my_team, num_categories: classifiers.len()});
         println!("iteration");
 
     }
 
-    Ok(results)
+    Ok(())
 
+}
+
+fn results_to_chunks<'a>(stream: impl Stream<Item=FullResult, Error=hyper::Error> + 'a) -> Box<Stream<Item=hyper::Chunk, Error=hyper::Error> + 'a> {
+    Box::new(stream.map(|result| {
+        println!("*** {:?}", result);
+        (serde_json::to_string(&result).unwrap() + "`").into()
+    }).map_err(|err| {
+        unimplemented!()
+    }))
 }
 
 fn main() {
