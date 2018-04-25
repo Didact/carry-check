@@ -360,25 +360,32 @@ fn get_account_name(platform: PlatformType, account_id: AccountId, client: Clien
             })
     })))
 }
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all="camelCase")]
+struct WeeklyInfo {
+    // membership_id: AccountId,
+    mode: u64,
+    elo: u64,
+    // date: DateTime<Utc>,
+    kills: u64,
+    deaths: u64,
+    // #[serde(rename="gamesPlayed")]
+    games_played: u64,
+    wins: u64,
+}
+
 const ELO_KEY: MemoizeKey<AccountId, f64, hyper::Error> = MemoizeKey::new("get_elo");
 #[async]
-fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<f64> {
-    // Ok(200.0)
-    let url = format!("https://api.guardian.gg/v2/players/{}?lc=en", account_id);
-    println!("{}", url);
+fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<f64> {    
+    let url = format!("https://api.guardian.gg/v2/players/{}/performance/39/2017-09-06/{}?lc=en", account_id, Utc::now().format("%Y-%m-%d"));
+    // println!("{}", url);
     let req = Request::new(Method::Get, url.parse().unwrap());
     await!(memoize(ELO_KEY, account_id, client.request(req).and_then(|res| {
         res.body().concat2().map(|body| {
-            serde_json::from_slice::<Value>(&body)
-                .as_ref().ok()
-                .and_then(|v| v.get("player"))
-                .and_then(|v| v.get("stats"))
-                .and_then(|v| v.as_array())
-                .and_then(|a| a.iter().find(|v| v.as_object().unwrap().get("mode").unwrap().as_u64().unwrap() == 39))
-                .and_then(|v| v.as_object())
-                .and_then(|v| v.get("elo"))
-                .and_then(|e| e.as_f64())
-                .unwrap_or(1200.0)
+            let weeklies = serde_json::from_slice::<Vec<WeeklyInfo>>(&body).unwrap();
+            let last_elo = weeklies.last().unwrap().elo;
+            last_elo as f64
         })
     })))
 }
@@ -386,9 +393,7 @@ fn get_elo(account_id: AccountId, client: Client<impl Connect>) -> hyper::Result
 #[async]
 fn get_inference_input(platform: PlatformType, account_id: AccountId, client: Client<impl Connect>) -> hyper::Result<InferenceInput> {
     let lifetime_stats = await!(get_account_stats(platform, account_id, client.clone()))?;
-    // println!("stats");
-    let elo = 200.0; //await!(get_elo(account_id, client.clone()))?;
-    // println!("{:?}", elo);
+    let elo = await!(get_elo(account_id, client.clone()))?;
     Ok(InferenceInput{account_id, kd: lifetime_stats.kills as f64 / lifetime_stats.deaths as f64, total_games: lifetime_stats.total_games, elo: elo})
 }
 
@@ -516,7 +521,7 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<()>
         let mut classifiers: HashMap<&'static str, &Fn(&Vec<InferenceInput>) -> Vec<AccountId>> = HashMap::new();
         // classifiers.insert("test", &tttt);
         classifiers.insert("games", &games_fn);
-        // classifiers.insert("ELO", &elo_fn);
+        classifiers.insert("ELO", &elo_fn);
         classifiers.insert("kd", &kd_fn);
         let judgements = make_carry_judgement(&inputs, &classifiers).into_iter().map(|(k, v)| (gamertags_map[&k].clone(), v)).collect();
         stream_yield!(FullResult{opponents: opponents_gamertags, judgements, time: pgcr.time, won: pgcr.winner == my_team, num_categories: classifiers.len()});
@@ -529,11 +534,15 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<()>
 }
 
 fn results_to_chunks<'a>(stream: impl Stream<Item=FullResult, Error=hyper::Error> + 'a) -> Box<Stream<Item=hyper::Chunk, Error=hyper::Error> + 'a> {
+    let start = std::rc::Rc::new(Utc::now());
     Box::new(stream.map(|result| {
         println!("*** {:?}", result);
         (serde_json::to_string(&result).unwrap() + "`").into()
     }).map_err(|err| {
         unimplemented!()
+    }).inspect(move |_| {
+        let current = Utc::now();
+        println!("{:?}", current.signed_duration_since(*start.clone()));
     }))
 }
 
