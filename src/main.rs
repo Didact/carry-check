@@ -558,7 +558,7 @@ fn results_to_chunks<'a>(stream: impl Stream<Item=FullResult, Error=hyper::Error
 }
 
 fn main() {
-    let addr = "0.0.0.0:3002".parse().unwrap();
+    let addr = "0.0.0.0:10302".parse().unwrap();
     let mut core = Core::new().unwrap();
     let server_handle = core.handle();
     let client_handle = core.handle();
