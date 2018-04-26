@@ -82,9 +82,20 @@ impl Service for Carry {
             }
         };
         let gamertag = req.uri().path().split('/').nth(2).unwrap();
-        println!("gamertag: {:?}", gamertag);
         let results = run_full(String::from(gamertag), client.clone());
-        Box::new(futures::future::ok(Response::new().with_body(results_to_chunks(results))))
+        match req.uri().path().split('/').nth(3) {
+            Some("stream") => {
+                Box::new(futures::future::ok(Response::new().with_body(results_to_chunks(results))))
+            }
+            _ => {
+                Box::new(results.collect().map(|results| {
+                    let vec = serde_json::to_vec(&results).unwrap();
+                    let other: hyper::Chunk = vec.into();
+                    let stream: Box<Stream<Item=hyper::Chunk, Error=hyper::Error>> = Box::new(futures::stream::once(Ok::<hyper::Chunk, hyper::Error>(other)));
+                    Response::new().with_body(stream)
+                }))
+            }
+        }
     }
 
 }
@@ -547,7 +558,7 @@ fn results_to_chunks<'a>(stream: impl Stream<Item=FullResult, Error=hyper::Error
 }
 
 fn main() {
-    let addr = "127.0.0.1:3002".parse().unwrap();
+    let addr = "0.0.0.0:3002".parse().unwrap();
     let mut core = Core::new().unwrap();
     let server_handle = core.handle();
     let client_handle = core.handle();
