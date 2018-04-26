@@ -7,7 +7,7 @@ use futures::future::{Future, IntoFuture};
 use std::marker::{PhantomData};
 
 lazy_static! {
-    static ref memoize_dict: Mutex<HashMap<&'static str, usize>> = {Mutex::new(HashMap::new())};
+    static ref MEMOIZE_DICT: Mutex<HashMap<&'static str, usize>> = {Mutex::new(HashMap::new())};
 }
 
 #[derive(Copy, Clone)]
@@ -43,7 +43,7 @@ where
     K: Hash + Eq + Clone,
     T: Clone,
     F: IntoFuture<Item=T, Error=E> {
-        let mut dict = memoize_dict.lock().unwrap();
+        let mut dict = MEMOIZE_DICT.lock().unwrap();
         if !dict.contains_key(memoize_key.key) {
             dict.insert(
                 memoize_key.key, 
