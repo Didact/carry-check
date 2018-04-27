@@ -52,6 +52,7 @@ where
         }
 
         Memoize {
+            type_identifier: memoize_key.key,
             key: primary_key,
             cache: unsafe { &*(*dict.get(memoize_key.key).unwrap() as *mut Arc<Mutex<HashMap<K, T>>>) }.clone(),
             future: future.into_future()
@@ -60,6 +61,7 @@ where
 
 pub struct Memoize<K, T, E, F>
 where F: Future<Item=T, Error=E> {
+    type_identifier: &'static str,
     key: K,
     cache: Arc<Mutex<HashMap<K, T>>>,
     future: F
@@ -76,11 +78,13 @@ where
     fn poll(&mut self) -> futures::Poll<Self::Item, Self::Error> {
         let mut dict = self.cache.lock().unwrap();
         if let Some(cached) = dict.get(&self.key) {
+            trace!("Found cached value for {}", self.type_identifier);
             return Ok(futures::Async::Ready(cached.clone()))
         }
         let result = self.future.poll();
         match result {
             Ok(futures::Async::Ready(ref t)) => {
+                trace!("Insert cached value for {}", self.type_identifier);
                 dict.insert(self.key.clone(), t.clone());
             }
             _ => {}

@@ -15,3 +15,5 @@ chrono = { version = "0.4", features = ["serde"] }
 lazy_static = "0.2"
 num = "0.1.40"
 futures-await = "0.1"
+log = "0.4"
+env_logger = "0.5.9"
