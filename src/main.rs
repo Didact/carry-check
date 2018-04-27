@@ -507,7 +507,7 @@ fn run_full(gamertag: String, client: Client<impl Connect>) -> hyper::Result<()>
             }
             _ => {
                 // error!("{} was not found", gamertag);
-                return unimplemented!();
+                return Ok(());
             }
         }
 
